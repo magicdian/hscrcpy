@@ -1,51 +1,70 @@
 # Quality Guidelines
 
-> Code quality standards for frontend development.
+> Quality expectations for ArkTS shell code.
 
 ---
 
 ## Overview
 
-<!--
-Document your project's quality standards here.
-
-Questions to answer:
-- What patterns are forbidden?
-- What linting rules do you enforce?
-- What are your testing requirements?
-- What code review standards apply?
--->
-
-(To be filled by the team)
+The frontend in this repo is not the product core, but it is the first layer users and permissions flow will touch. Keep it disciplined, typed, and small.
 
 ---
 
 ## Forbidden Patterns
 
-<!-- Patterns that should never be used and why -->
-
-(To be filled by the team)
+* Embedding transport or codec logic in pages
+* Bypassing the typed native bridge
+* Copying resource values directly into components
+* Growing template screens into a permanent control center
+* Ignoring lint or test scaffolding because the UI is "just a shell"
 
 ---
 
 ## Required Patterns
 
-<!-- Patterns that must always be used -->
-
-(To be filled by the team)
+* Keep lifecycle work in `UIAbility`
+* Keep page state local unless a stronger boundary is needed
+* Use resources for stable strings and constants
+* Keep permission/configuration UX explicit
+* Keep user-facing shell code readable enough that native integration points are obvious
 
 ---
 
 ## Testing Requirements
 
-<!-- What level of testing is expected -->
+Current repo baseline already includes:
 
-(To be filled by the team)
+* local unit test scaffolding
+* `ohosTest` ability-test scaffolding
+
+Expectation:
+
+* keep scaffolding valid
+* add tests for bridge-facing UI behavior once real behavior exists
+* add permission/configuration flow tests when those screens are introduced
 
 ---
 
 ## Code Review Checklist
 
-<!-- What reviewers should check -->
+* Is this UI code still a shell, or is it absorbing runtime logic?
+* Are bridge calls typed and narrowly scoped?
+* Are strings and constants placed in resources where appropriate?
+* Does the change preserve a clean split between lifecycle, page UI, and native core?
+* Were tests or mocks updated if the UI contract changed?
 
-(To be filled by the team)
+---
+
+## Examples
+
+* [`sources/hscrcpy_server/code-linter.json5`](../../sources/hscrcpy_server/code-linter.json5): ArkTS linting is already enabled with performance and TypeScript-oriented rules.
+* [`sources/hscrcpy_server/entry/src/test/LocalUnit.test.ets`](../../sources/hscrcpy_server/entry/src/test/LocalUnit.test.ets): frontend unit-test scaffolding exists and should not be abandoned.
+* [`sources/hscrcpy_server/entry/src/mock/Libentry.mock.ets`](../../sources/hscrcpy_server/entry/src/mock/Libentry.mock.ets): mocks belong in dedicated mock files rather than ad hoc page hacks.
+
+---
+
+## Common Mistakes
+
+* Treating shell code as exempt from architecture discipline.
+* Overusing mock-only code paths in production components.
+* Forgetting that permission UX is part of product quality.

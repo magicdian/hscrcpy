@@ -1,12 +1,44 @@
 # Frontend Development Guidelines
 
-> Best practices for frontend development in this project.
+> Baseline rules for user-facing HarmonyOS shell code.
 
 ---
 
 ## Overview
 
-This directory contains guidelines for frontend development. Fill in each file with your project's specific conventions.
+Today, "frontend" in this repository means the ArkTS and resource layer inside `sources/hscrcpy_server/entry/src/main`.
+
+This layer is intentionally thin:
+
+* UIAbility lifecycle
+* permission and configuration surfaces
+* page composition
+* the bridge into native code
+
+It is not where streaming, transport, or device-control business logic should live.
+
+---
+
+## Current Scope
+
+* Current UI is the default DevEco template page in [`sources/hscrcpy_server/entry/src/main/ets/pages/Index.ets`](../../sources/hscrcpy_server/entry/src/main/ets/pages/Index.ets).
+* App lifecycle is handled in [`sources/hscrcpy_server/entry/src/main/ets/entryability/EntryAbility.ets`](../../sources/hscrcpy_server/entry/src/main/ets/entryability/EntryAbility.ets).
+* Static resources and page registration live under `entry/src/main/resources/`.
+* There are no custom hooks, no global store, and no network/server-state framework yet.
+
+---
+
+## Pre-Development Checklist
+
+Read these before changing frontend code:
+
+1. [Directory Structure](./directory-structure.md)
+2. [Component Guidelines](./component-guidelines.md)
+3. [State Management](./state-management.md)
+4. [Type Safety](./type-safety.md)
+5. [Quality Guidelines](./quality-guidelines.md)
+6. [Hook Guidelines](./hook-guidelines.md) if introducing reusable stateful helpers
+7. [Cross-Layer Thinking Guide](../guides/cross-layer-thinking-guide.md) when adding or changing native bridge calls
 
 ---
 
@@ -14,26 +46,13 @@ This directory contains guidelines for frontend development. Fill in each file w
 
 | Guide | Description | Status |
 |-------|-------------|--------|
-| [Directory Structure](./directory-structure.md) | Module organization and file layout | To fill |
-| [Component Guidelines](./component-guidelines.md) | Component patterns, props, composition | To fill |
-| [Hook Guidelines](./hook-guidelines.md) | Custom hooks, data fetching patterns | To fill |
-| [State Management](./state-management.md) | Local state, global state, server state | To fill |
-| [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
-| [Type Safety](./type-safety.md) | Type patterns, validation | To fill |
+| [Directory Structure](./directory-structure.md) | ArkTS and resource placement | Baseline defined |
+| [Component Guidelines](./component-guidelines.md) | ArkTS page/component structure | Baseline defined |
+| [Hook Guidelines](./hook-guidelines.md) | Current no-hook policy for Harmony shell | Baseline defined |
+| [State Management](./state-management.md) | Local-only state strategy for current shell | Baseline defined |
+| [Quality Guidelines](./quality-guidelines.md) | Review, lint, and test expectations | Baseline defined |
+| [Type Safety](./type-safety.md) | ArkTS and native-bridge typing rules | Baseline defined |
 
 ---
 
-## How to Fill These Guidelines
-
-For each guideline file:
-
-1. Document your project's **actual conventions** (not ideals)
-2. Include **code examples** from your codebase
-3. List **forbidden patterns** and why
-4. Add **common mistakes** your team has made
-
-The goal is to help AI assistants and new team members understand how YOUR project works.
-
----
-
-**Language**: All documentation should be written in **English**.
+**Language**: Write UI copy in the product language you choose later, but keep code comments, docs, and identifiers in English.
