@@ -1,0 +1,9 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Render bringup should keep tests and seams clean instead of mixing concerns"}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Video-unit semantics and selected codec behavior for render consumption"}
+{"file": "crates/hscrcpy-host/src/render/mod.rs", "reason": "Current render seam that is still NotImplemented"}
+{"file": "crates/hscrcpy-host/src/video/mod.rs", "reason": "Negotiated video-path and metadata model that render should consume"}
+{"file": "crates/hscrcpy-host/src/video/h264.rs", "reason": "Current host H264 ingestion path"}
+{"file": "crates/hscrcpy-host/src/video/jpeg.rs", "reason": "Current host JPEG fallback ingestion path"}
+{"file": "apps/hscrcpy-host-cli/src/main.rs", "reason": "Potential host-side bringup/demo entry point for early rendering"}

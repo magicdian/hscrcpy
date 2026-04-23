@@ -1,0 +1,13 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Transport runtime needs explicit failure and retry boundaries"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Session/video runtime should log channel lifecycle consistently"}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Source of truth for runtime session/video channel order and semantics"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Host transport runtime crosses HDC, startup, contracts, and video ingestion"}
+{"file": "crates/hscrcpy-contracts/src/session.rs", "reason": "Current session message contracts that the runtime transport must carry"}
+{"file": "crates/hscrcpy-contracts/src/channel.rs", "reason": "Current transport/channel model"}
+{"file": "crates/hscrcpy-host/src/hdc/mod.rs", "reason": "Runtime HDC integration point"}
+{"file": "crates/hscrcpy-host/src/companion/mod.rs", "reason": "Companion launch/apply integration point before transport startup"}
+{"file": "crates/hscrcpy-host/src/session/startup.rs", "reason": "Current startup orchestration that must advance into runtime transport"}
+{"file": "crates/hscrcpy-host/src/client/mod.rs", "reason": "Host-side client/session runtime seam"}
+{"file": "crates/hscrcpy-host/src/video/mod.rs", "reason": "Runtime video ingress should stay compatible with negotiated host video paths"}

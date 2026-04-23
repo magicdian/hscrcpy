@@ -1,0 +1,11 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend development guide"}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Source of truth for direct-launch companion behavior and session/video channel ordering"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Listener startup crosses launch path, ArkTS ability lifecycle, and native transport runtime"}
+{"file": "sources/hscrcpy_server/entry/src/main/ets/entryability/EntryAbility.ets", "reason": "Current launch path only starts the shell UI and must bootstrap the runtime listener"}
+{"file": "sources/hscrcpy_server/entry/src/main/module.json5", "reason": "Current ability model and launch target"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/core/companion_core.cpp", "reason": "Native runtime/session state entry point"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/transport/session_channel.cpp", "reason": "Current session transport state machine that needs a real listener accept path"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/transport/video_channel.cpp", "reason": "Video activation must remain aligned once the session listener becomes real"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/bridge/companion_napi.cpp", "reason": "Keep preview bridge surfaces compatible while adding launch-time runtime bootstrap"}

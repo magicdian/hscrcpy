@@ -1,0 +1,10 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Deploy failures need explicit host-side failure modes"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Install/update decisions should be observable in logs"}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Source of truth for companion install/update ownership and decision states"}
+{"file": "crates/hscrcpy-host/src/companion/mod.rs", "reason": "Current companion plan/apply stub to replace"}
+{"file": "crates/hscrcpy-host/src/error.rs", "reason": "Host error categories used by deploy/install logic"}
+{"file": "crates/hscrcpy-host/src/session/startup.rs", "reason": "Current orchestrator entry point that consumes the companion manager"}
+{"file": "sources/hscrcpy_server/AppScope/app.json5", "reason": "Current HarmonyOS companion bundle identity and version metadata"}
+{"file": "sources/hscrcpy_server/entry/src/main/module.json5", "reason": "Current module/ability identity for host deploy assumptions"}

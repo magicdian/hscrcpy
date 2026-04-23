@@ -1,0 +1,11 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend development guide"}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Source of truth for runtime session/video channel behavior"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Device transport crosses ArkTS shell, native core, and video/control modules"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/core/companion_contracts.h", "reason": "Current device-side protocol and session definitions"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/core/companion_core.cpp", "reason": "Current native session preview/runtime shaping entry point"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/bridge/companion_napi.cpp", "reason": "Current N-API surface that exposes preview data to ArkTS"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/video/h264_video_path.cpp", "reason": "Current H264 path that transport runtime will eventually feed"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/video/jpeg_video_path.cpp", "reason": "Current JPEG fallback path that runtime transport must preserve"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/control/control_message_handler.cpp", "reason": "Control-plane runtime traffic must stay on the session channel"}

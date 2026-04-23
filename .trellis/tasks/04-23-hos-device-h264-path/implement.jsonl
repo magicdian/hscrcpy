@@ -1,0 +1,10 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend development guide"}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Source of truth for video capability negotiation and fallback behavior"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "H264 path crosses ArkTS shell, native core, and session boundaries"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/core/companion_contracts.h", "reason": "Current device-side capability and session contract definitions"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/core/companion_core.cpp", "reason": "Current native core startup and preview shaping"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/bridge/companion_napi.cpp", "reason": "Current N-API bridge that exposes session preview and startup results"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/video/jpeg_video_path.cpp", "reason": "Existing JPEG baseline to preserve as fallback when introducing H264 mainline"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/CMakeLists.txt", "reason": "Native source registration for any new video path modules"}

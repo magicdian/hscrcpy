@@ -1,0 +1,9 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Runtime process and transport failures must surface cleanly"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "HDC runtime should emit useful diagnostics without ad hoc logging"}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Source of truth for HDC-based MVP connectivity and channel lifecycle"}
+{"file": "crates/hscrcpy-host/src/hdc/mod.rs", "reason": "Current HDC trait and stub implementation to replace"}
+{"file": "crates/hscrcpy-host/src/error.rs", "reason": "Host runtime error taxonomy used by HDC operations"}
+{"file": "crates/hscrcpy-host/src/session/startup.rs", "reason": "Current orchestrator entry point that consumes the HDC abstraction"}
+{"file": "crates/hscrcpy-contracts/src/channel.rs", "reason": "Channel transport types that later HDC forwarding must support"}

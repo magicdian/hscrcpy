@@ -1,0 +1,7 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend development guide"}
+{"file": "sources/hscrcpy_server/entry/src/main/module.json5", "reason": "Primary HarmonyOS module manifest and permission declaration point"}
+{"file": "sources/hscrcpy_server/AppScope/app.json5", "reason": "App-level metadata that may affect permission/application behavior"}
+{"file": "sources/hscrcpy_server/entry/src/main/ets/entryability/EntryAbility.ets", "reason": "Current bootstrap log surface for verifying listener startup state"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/transport/session_listener_runtime.cpp", "reason": "Current socket creation site that fails with Operation not permitted"}

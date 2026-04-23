@@ -1,0 +1,53 @@
+{
+  "id": "hos-arch-contracts",
+  "name": "hos-arch-contracts",
+  "title": "Define host-device architecture and contracts",
+  "description": "Define cross-layer startup, capability negotiation, packaging, and session contracts for host/device development.",
+  "status": "completed",
+  "dev_type": "fullstack",
+  "scope": "architecture",
+  "package": null,
+  "priority": "P1",
+  "creator": "magicdian",
+  "assignee": "magicdian",
+  "createdAt": "2026-04-22",
+  "completedAt": "2026-04-23",
+  "branch": "feature/hos-arch-contracts",
+  "base_branch": "dev",
+  "worktree_path": null,
+  "current_phase": 0,
+  "next_action": [
+    {
+      "phase": 1,
+      "action": "brainstorm"
+    },
+    {
+      "phase": 2,
+      "action": "research"
+    },
+    {
+      "phase": 3,
+      "action": "implement"
+    },
+    {
+      "phase": 4,
+      "action": "check"
+    },
+    {
+      "phase": 5,
+      "action": "update-spec"
+    },
+    {
+      "phase": 6,
+      "action": "record-session"
+    }
+  ],
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "04-22-hos-scrcpy-brainstorm",
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

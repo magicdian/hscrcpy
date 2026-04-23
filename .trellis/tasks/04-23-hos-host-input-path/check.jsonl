@@ -1,0 +1,4 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check.md", "reason": "Code quality check spec"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Control-path failures and fallback should be surfaced clearly"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Host control path must fail explicitly"}

@@ -1,0 +1,11 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend development guide"}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Source of truth for binary video channel semantics after session_ready"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Video runtime crosses negotiated session state, native transport, and host packet expectations"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/core/companion_contracts.h", "reason": "Default ports and negotiated video contract constants"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/transport/session_listener_runtime.cpp", "reason": "Current real session listener/runtime to align video activation timing with session_ready"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/transport/video_channel.cpp", "reason": "Current video state machine that must become a real packet writer"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/transport/video_channel.h", "reason": "Current video transport interfaces and state"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/video/jpeg_video_path.cpp", "reason": "Minimal viable JPEG packet source path for first real binary delivery"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/video/h264_video_path.cpp", "reason": "Keep H264 header/path compatibility while building the runtime"}

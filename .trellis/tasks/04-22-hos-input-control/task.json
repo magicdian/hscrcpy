@@ -1,0 +1,56 @@
+{
+  "id": "hos-input-control",
+  "name": "hos-input-control",
+  "title": "Implement input control channel",
+  "description": "Add host-device control messages and device-side input injection for scrcpy-like interaction.",
+  "status": "completed",
+  "dev_type": "fullstack",
+  "scope": "control",
+  "package": null,
+  "priority": "P2",
+  "creator": "magicdian",
+  "assignee": "magicdian",
+  "createdAt": "2026-04-22",
+  "completedAt": "2026-04-23",
+  "branch": "feature/hos-input-control",
+  "base_branch": "dev",
+  "worktree_path": null,
+  "current_phase": 0,
+  "next_action": [
+    {
+      "phase": 1,
+      "action": "brainstorm"
+    },
+    {
+      "phase": 2,
+      "action": "research"
+    },
+    {
+      "phase": 3,
+      "action": "implement"
+    },
+    {
+      "phase": 4,
+      "action": "check"
+    },
+    {
+      "phase": 5,
+      "action": "update-spec"
+    },
+    {
+      "phase": 6,
+      "action": "record-session"
+    }
+  ],
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "04-23-hos-device-input-path",
+    "04-23-hos-host-input-path"
+  ],
+  "parent": "04-22-hos-scrcpy-brainstorm",
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

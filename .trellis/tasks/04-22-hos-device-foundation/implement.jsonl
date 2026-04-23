@@ -1,0 +1,8 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend development guide"}
+{"file": "sources/hscrcpy_server/entry/src/main/module.json5", "reason": "Current DevEco module metadata"}
+{"file": "sources/hscrcpy_server/entry/src/main/ets/entryability/EntryAbility.ets", "reason": "Current shell lifecycle"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/napi_init.cpp", "reason": "Current native bridge entry"}
+{"file": ".trellis/spec/frontend/directory-structure.md", "reason": "Keep ArkTS shell thin"}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "Bridge typing guidance"}

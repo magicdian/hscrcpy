@@ -1,0 +1,8 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Launch readiness should report startup phase failures precisely"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Readiness retries should remain observable and bounded"}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Source of truth for launch then session connect ordering"}
+{"file": "crates/hscrcpy-host/src/companion/mod.rs", "reason": "Host launch path that currently starts the companion and immediately returns"}
+{"file": "crates/hscrcpy-host/src/session/startup.rs", "reason": "Current startup path attempts immediate session connect after launch"}
+{"file": "crates/hscrcpy-host/src/error.rs", "reason": "Phase-specific startup and transport errors should remain coherent"}

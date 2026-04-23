@@ -1,0 +1,6 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/tasks/04-22-hos-scrcpy-brainstorm/prd.md", "reason": "Parent product requirements"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Host module layout guidance"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Host orchestration should fail explicitly"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Session/install telemetry rules"}

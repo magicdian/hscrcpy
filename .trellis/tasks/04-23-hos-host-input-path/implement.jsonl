@@ -1,0 +1,6 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Source of truth for control_event sequencing and payloads"}
+{"file": "crates/hscrcpy-contracts/src/session.rs", "reason": "Current control-enable session request types"}
+{"file": "crates/hscrcpy-host/src/session/startup.rs", "reason": "Current host startup/control placeholder behavior"}
+{"file": "crates/hscrcpy-host/src/lib.rs", "reason": "Host exports and module wiring"}

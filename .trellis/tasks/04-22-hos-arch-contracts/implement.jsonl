@@ -1,0 +1,6 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend development guide"}
+{"file": ".trellis/tasks/04-22-hos-scrcpy-brainstorm/prd.md", "reason": "Parent product requirements"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Cross-layer startup and session design"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Shared contracts should avoid duplication"}

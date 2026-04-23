@@ -1,0 +1,9 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend development guide"}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Source of truth for session/video channel split and runtime handshake order"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Transport runtime crosses host, native core, and thin shell boundaries"}
+{"file": "crates/hscrcpy-contracts/src/session.rs", "reason": "Current session message contracts that runtime transport must carry"}
+{"file": "crates/hscrcpy-contracts/src/channel.rs", "reason": "Current channel definitions for transport runtime"}
+{"file": "crates/hscrcpy-host/src/session/startup.rs", "reason": "Current host startup plan that must eventually drive runtime transport"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/core/companion_contracts.h", "reason": "Current device contract and preview/runtime shaping boundary"}

@@ -1,0 +1,53 @@
+{
+  "id": "hos-host-input-path",
+  "name": "hos-host-input-path",
+  "title": "Implement host input control path",
+  "description": "Add Rust host-side control message emission and session control flow on top of the host foundation.",
+  "status": "completed",
+  "dev_type": "backend",
+  "scope": "host-control",
+  "package": null,
+  "priority": "P1",
+  "creator": "magicdian",
+  "assignee": "magicdian",
+  "createdAt": "2026-04-23",
+  "completedAt": "2026-04-23",
+  "branch": "feature/hos-host-input-path",
+  "base_branch": "dev",
+  "worktree_path": null,
+  "current_phase": 0,
+  "next_action": [
+    {
+      "phase": 1,
+      "action": "brainstorm"
+    },
+    {
+      "phase": 2,
+      "action": "research"
+    },
+    {
+      "phase": 3,
+      "action": "implement"
+    },
+    {
+      "phase": 4,
+      "action": "check"
+    },
+    {
+      "phase": 5,
+      "action": "update-spec"
+    },
+    {
+      "phase": 6,
+      "action": "record-session"
+    }
+  ],
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "04-22-hos-input-control",
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

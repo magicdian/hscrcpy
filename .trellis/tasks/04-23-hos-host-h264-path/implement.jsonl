@@ -1,0 +1,10 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Source of truth for capability negotiation and preferred video path selection"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "H264 negotiation spans contracts, startup, and video pipeline layers"}
+{"file": "crates/hscrcpy-contracts/src/capability.rs", "reason": "Current codec capability types that need H264-aware negotiation"}
+{"file": "crates/hscrcpy-contracts/src/session.rs", "reason": "Current startup/session types used by JPEG and control baselines"}
+{"file": "crates/hscrcpy-host/src/session/startup.rs", "reason": "Current startup selection path that should prefer H264 and fall back to JPEG"}
+{"file": "crates/hscrcpy-host/src/video/mod.rs", "reason": "Current host video module boundary for explicit H264 path addition"}
+{"file": "crates/hscrcpy-host/src/video/jpeg.rs", "reason": "Existing JPEG fallback implementation to preserve"}
+{"file": "crates/hscrcpy-host/src/render/mod.rs", "reason": "Future render seam and current host-side video integration point"}

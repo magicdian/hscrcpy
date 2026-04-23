@@ -1,6 +1,20 @@
 {
   "app": {
-    "signingConfigs": [],
+    "signingConfigs": [
+      {
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "/Users/magicdian/.ohos/config/default_hscrcpy_server__kbiWDne4M83KudCCc1jxtRj46LbHjNvqO-uov6v5Vo=.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "0000001AF1FA3D962FC59C049610A379D9DDF9DD107CDECC3E0A00F193CEED1B638908E7EC49DA116273",
+          "profile": "/Users/magicdian/.ohos/config/default_hscrcpy_server__kbiWDne4M83KudCCc1jxtRj46LbHjNvqO-uov6v5Vo=.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "/Users/magicdian/.ohos/config/default_hscrcpy_server__kbiWDne4M83KudCCc1jxtRj46LbHjNvqO-uov6v5Vo=.p12",
+          "storePassword": "0000001AD8759F46D3E9ED8EDB3345CF835B21E60C50AD8C953B967A4AF3E33F4DA4D3A63B96EAA605A5"
+        }
+      }
+    ],
     "products": [
       {
         "name": "default",

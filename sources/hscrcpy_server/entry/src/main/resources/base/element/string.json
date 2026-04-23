@@ -2,15 +2,15 @@
   "string": [
     {
       "name": "module_desc",
-      "value": "module description"
+      "value": "hscrcpy Harmony companion module"
     },
     {
       "name": "EntryAbility_desc",
-      "value": "description"
+      "value": "Thin HarmonyOS shell for the native hscrcpy companion"
     },
     {
       "name": "EntryAbility_label",
-      "value": "label"
+      "value": "hscrcpy"
     }
   ]
 }

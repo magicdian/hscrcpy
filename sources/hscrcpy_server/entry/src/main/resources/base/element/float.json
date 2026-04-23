@@ -1,8 +1,24 @@
 {
   "float": [
     {
-      "name": "page_text_font_size",
-      "value": "50fp"
+      "name": "shell_title_font_size",
+      "value": "28fp"
+    },
+    {
+      "name": "shell_subtitle_font_size",
+      "value": "15fp"
+    },
+    {
+      "name": "shell_section_title_font_size",
+      "value": "18fp"
+    },
+    {
+      "name": "shell_body_font_size",
+      "value": "14fp"
+    },
+    {
+      "name": "shell_badge_font_size",
+      "value": "11fp"
     }
   ]
 }

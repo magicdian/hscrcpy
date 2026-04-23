@@ -1,0 +1,16 @@
+[workspace]
+members = [
+    "apps/hscrcpy-host-cli",
+    "crates/hscrcpy-contracts",
+    "crates/hscrcpy-host",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+authors = ["hscrcpy contributors"]
+
+[workspace.dependencies]
+hscrcpy-contracts = { path = "crates/hscrcpy-contracts" }
+hscrcpy-host = { path = "crates/hscrcpy-host" }

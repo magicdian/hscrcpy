@@ -1,0 +1,8 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend development guide"}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Architecture contract for session/video semantics"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Device video path crosses shell/native boundary"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/core/companion_contracts.h", "reason": "Current device-side session/video contract scaffold"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/core/companion_core.cpp", "reason": "Current native core scaffold"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/bridge/companion_napi.cpp", "reason": "Current N-API surface"}

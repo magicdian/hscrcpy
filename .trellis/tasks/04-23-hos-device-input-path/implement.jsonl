@@ -1,0 +1,8 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend development guide"}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Source of truth for control_event and authorization semantics"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Input control crosses session and native/device boundaries"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/core/companion_contracts.h", "reason": "Current device control contract placeholders"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/core/companion_core.cpp", "reason": "Current device-side rejection path for control"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/bridge/companion_napi.cpp", "reason": "Current N-API request parsing and control rejection"}

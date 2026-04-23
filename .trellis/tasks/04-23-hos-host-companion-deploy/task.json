@@ -1,0 +1,53 @@
+{
+  "id": "hos-host-companion-deploy",
+  "name": "hos-host-companion-deploy",
+  "title": "Implement host companion deploy runtime",
+  "description": "Replace the host companion install/update stubs with a real deployment plan and apply path for the HarmonyOS companion artifact.",
+  "status": "completed",
+  "dev_type": "backend",
+  "scope": "host-companion",
+  "package": null,
+  "priority": "P1",
+  "creator": "magicdian",
+  "assignee": "magicdian",
+  "createdAt": "2026-04-23",
+  "completedAt": "2026-04-23",
+  "branch": "feature/hos-host-companion-deploy",
+  "base_branch": "dev",
+  "worktree_path": null,
+  "current_phase": 0,
+  "next_action": [
+    {
+      "phase": 1,
+      "action": "brainstorm"
+    },
+    {
+      "phase": 2,
+      "action": "research"
+    },
+    {
+      "phase": 3,
+      "action": "implement"
+    },
+    {
+      "phase": 4,
+      "action": "check"
+    },
+    {
+      "phase": 5,
+      "action": "update-spec"
+    },
+    {
+      "phase": 6,
+      "action": "record-session"
+    }
+  ],
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "04-22-hos-scrcpy-brainstorm",
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

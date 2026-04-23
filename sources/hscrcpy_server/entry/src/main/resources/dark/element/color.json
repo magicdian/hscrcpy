@@ -2,7 +2,47 @@
   "color": [
     {
       "name": "start_window_background",
-      "value": "#000000"
+      "value": "#08111F"
+    },
+    {
+      "name": "shell_page_background",
+      "value": "#08111F"
+    },
+    {
+      "name": "shell_hero_background",
+      "value": "#0E2037"
+    },
+    {
+      "name": "shell_hero_text",
+      "value": "#F8FAFC"
+    },
+    {
+      "name": "shell_hero_text_secondary",
+      "value": "#C9D7EA"
+    },
+    {
+      "name": "shell_badge_background",
+      "value": "#173A63"
+    },
+    {
+      "name": "shell_badge_text",
+      "value": "#D8ECFF"
+    },
+    {
+      "name": "shell_card_background",
+      "value": "#132033"
+    },
+    {
+      "name": "shell_card_border",
+      "value": "#213146"
+    },
+    {
+      "name": "shell_text_primary",
+      "value": "#F8FAFC"
+    },
+    {
+      "name": "shell_text_secondary",
+      "value": "#C1CDDB"
     }
   ]
 }

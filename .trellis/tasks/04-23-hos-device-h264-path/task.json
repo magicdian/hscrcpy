@@ -1,0 +1,53 @@
+{
+  "id": "hos-device-h264-path",
+  "name": "hos-device-h264-path",
+  "title": "Implement device H264 mainline",
+  "description": "Add the HarmonyOS-side H.264 mainline path and JPEG fallback negotiation on top of the companion baseline.",
+  "status": "completed",
+  "dev_type": "fullstack",
+  "scope": "device-h264",
+  "package": null,
+  "priority": "P1",
+  "creator": "magicdian",
+  "assignee": "magicdian",
+  "createdAt": "2026-04-23",
+  "completedAt": "2026-04-23",
+  "branch": "feature/hos-device-h264-path",
+  "base_branch": "dev",
+  "worktree_path": null,
+  "current_phase": 0,
+  "next_action": [
+    {
+      "phase": 1,
+      "action": "brainstorm"
+    },
+    {
+      "phase": 2,
+      "action": "research"
+    },
+    {
+      "phase": 3,
+      "action": "implement"
+    },
+    {
+      "phase": 4,
+      "action": "check"
+    },
+    {
+      "phase": 5,
+      "action": "update-spec"
+    },
+    {
+      "phase": 6,
+      "action": "record-session"
+    }
+  ],
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "04-22-hos-h264-mainline",
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}
