@@ -351,3 +351,44 @@ Fixed hscrcpy-server H264 startup visibility and static-screen repeat handling, 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 8: Uitest startup snapshot IDR fallback
+
+**Date**: 2026-04-24
+**Task**: Uitest startup snapshot IDR fallback
+**Branch**: `dev`
+
+### Summary
+
+Added an opt-in uitest startup snapshot fallback that captures a pre-stream screenshot, encodes repeated synthetic H.264 IDR units for ffplay startup visibility, supports unsafe pre-IDR passthrough diagnostics, and records real-device validation showing immediate placeholder display before official stream takeover.
+
+### Main Changes
+
+- Added opt-in startup flags for uitest H.264 preview bootstrap: `--uitest-startup-snapshot-idr`, `--uitest-startup-snapshot-passthrough-pre-idr`, and `--ffmpeg-bin`.
+- Added host-side startup snapshot handling that captures `snapshot_display`, pulls the JPEG artifact through `hdc file recv`, and encodes a synthetic H.264 IDR payload with `ffmpeg`.
+- Prewarms `ffplay` before the official uitest route starts, writes repeated synthetic IDR units for immediate first-frame visibility, then lets the official stream take over.
+- Kept an unsafe diagnostic passthrough mode for pre-IDR official H.264 units so real-device behavior can be compared without discarding early non-IDR packets.
+- Updated the static fallback contract and logging guidelines with the startup snapshot flow, hdc artifact validation, and early renderer startup diagnostics.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `6321df4` | (see git log) |
+
+### Testing
+
+- [OK] `cargo fmt --check`
+- [OK] `cargo check --workspace --offline`
+- [OK] `cargo test --workspace --offline -- --nocapture`
+- [OK] `git diff --check`
+- [OK] Real-device manual validation: `ffplay` displayed the startup snapshot before visible screen changes; after screen movement, the official uitest stream took over with only a mild stall and no visible corruption.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
