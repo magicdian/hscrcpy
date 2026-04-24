@@ -177,3 +177,59 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 4: Real H.264 bringup and uitest extension findings
+
+**Date**: 2026-04-24
+**Task**: Real H.264 bringup and uitest extension findings
+**Branch**: `dev`
+
+### Summary
+
+(Add summary)
+
+### Main Changes
+
+| Area | Result |
+|------|--------|
+| Device H.264 mainline | Replaced placeholder H.264 bytes with `AVScreenCapture + VideoEncoder(surface)` and real access-unit streaming on the existing video channel. |
+| Host H.264 validation | Tightened host ingest to require Annex-B framing and IDR presence for keyframes, then validated against real device output. |
+| Live preview bringup | Upgraded host bringup from artifact dumping only to continuous `ffplay` live preview while preserving per-frame artifacts and `stream.h264` output. |
+| Stream diagnostics | Added interval-based host/device timing summaries so queueing, backpressure, and preview lag can be diagnosed from `events.log`, CLI `diag ...` lines, and native `hscrcpyDiag` hilog entries. |
+| UiTest extension POC | Built `hscrcpy_uitest_poc.so` with valid `UiTestExtension_OnInit/OnRun` exports, but real-device `uitest` loading failed at `Xpm check`, so self-authored extension `.so` is not a viable mainline path right now. |
+
+**Completed Tasks Archived**:
+- `04-23-hos-device-real-h264-pipeline`
+- `04-23-hos-host-real-h264-validation`
+- `04-23-hos-host-realtime-decode-display`
+- `04-23-hos-real-h264-stream-bringup`
+
+**Verification**:
+- `cargo test -p hscrcpy-host`
+- `cargo test -p hscrcpy-host-cli`
+- `cargo fmt --check`
+- Human verification on HarmonyOS device: real H.264 access units captured, authorization prompt observed, ffplay preview working, and `uitest` custom extension load rejected with `Xpm check failed`.
+
+**Spec Sync**:
+- Updated backend code-specs for native module layout, official hosScrcpy debug references, structured media diagnostics, and experiment-vs-production isolation.
+- Updated `docs/architecture/host-device-mvp-contract.md` so H.264 packets require Annex-B access units and keyframes require an IDR NAL.
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `63b0a4a` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
