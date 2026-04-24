@@ -1,0 +1,7 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check.md", "reason": "Code quality check spec"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "review host startup and H.264 ingest failure reporting"}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "confirm any host-side contract edits are coherent"}
+{"file": "crates/hscrcpy-host/src/session/startup.rs", "reason": "review startup sequencing against real video path"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "review tests and protocol handling for real-stream host path"}
+{"file": "crates/hscrcpy-host/src/video/h264.rs", "reason": "review access-unit validation and tests"}

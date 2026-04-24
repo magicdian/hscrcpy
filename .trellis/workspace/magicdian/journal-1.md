@@ -122,3 +122,58 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 3: Record official hosScrcpy investigation and uitest POC findings
+
+**Date**: 2026-04-24
+**Task**: Record official hosScrcpy investigation and uitest POC findings
+**Branch**: `dev`
+
+### Summary
+
+(Add summary)
+
+### Main Changes
+
+| Area | Finding |
+|------|---------|
+| Official source | Confirmed `scrcpy_server.so` comes from Huawei `DevecoTesting-Hypium 6.1.0.210` package and matches `hosScrcpy` unix `6.5-20260313` binary. |
+| Official assets | Archived official `hosScrcpy` and `xdevice-devicetest` so bundles under `third_party/hypium/` with versioned layout for future ABI and version compatibility work. |
+| Formal docs | Added forward-looking docs for official `hosScrcpy / uitest_agent / xdevice-devicetest` usage and a separate `uitest` extension POC record. |
+| UITest POC | Built custom `hscrcpy_uitest_poc.so`, verified exported `UiTestExtension_OnInit/OnRun`, packaged it into signed HAP, and compared stripped vs packaged outputs. |
+| Load result | `uitest` rejects the custom so at load time with `Xpm check failed` and `Permission denied`, while official `uitest_agent_1.2.3.so` launches successfully from `/data/local/tmp`. |
+| Current conclusion | Self-written extension so is not currently a viable mainline path; blocker is extension trust / code-signing enablement rather than ABI, symbols, or chmod bits. |
+
+**Artifacts**:
+- `docs/harmony-hos-scrcpy-debug-guide.md`
+- `docs/uitest-extension-poc.md`
+- `docs/README.md`
+- `third_party/hypium/README.md`
+- `third_party/hypium/hosScrcpy/6.1.0.210/...`
+- `third_party/hypium/xdevice-devicetest/6.1.0.210/...`
+
+**Manual verification performed**:
+- Compared official and live `scrcpy_server.so` hashes and package contents.
+- Ran `uitest` load test for custom `hscrcpy_uitest_poc.so`.
+- Ran `uitest` control test for official `uitest_agent_1.2.3.so`.
+- Confirmed packaged HAP contains `hscrcpy_uitest_poc.so`, but packaged/stripped output still lacks evidence of extension-level trust metadata.
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `3439861` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

@@ -1,0 +1,6 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check.md", "reason": "Code quality check spec"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "review native/media/socket failures and boundary mapping"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "review startup/capability/fallback logs for device stream path"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "verify bridge thinness, module boundaries, and test baseline"}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "ensure video packet/header semantics remain aligned"}

@@ -1,16 +1,16 @@
 {
-  "id": "hos-scrcpy-brainstorm",
-  "name": "hos-scrcpy-brainstorm",
-  "title": "brainstorm: HarmonyOS scrcpy-like tool",
-  "description": "",
+  "id": "hos-real-h264-stream-bringup",
+  "name": "hos-real-h264-stream-bringup",
+  "title": "Implement real H.264 screen stream bringup",
+  "description": "Replace placeholder H.264 payloads with a HarmonyOS-official screen capture + H.264 encode path and verify the host can consume real access units.",
   "status": "planning",
-  "dev_type": null,
+  "dev_type": "backend",
   "scope": null,
   "package": null,
-  "priority": "P2",
+  "priority": "P1",
   "creator": "magicdian",
   "assignee": "magicdian",
-  "createdAt": "2026-04-22",
+  "createdAt": "2026-04-23",
   "completedAt": null,
   "branch": null,
   "base_branch": "dev",
@@ -46,10 +46,10 @@
   "pr_url": null,
   "subtasks": [],
   "children": [
-    "04-23-hos-host-launch-readiness",
-    "04-23-hos-real-h264-stream-bringup"
+    "04-23-hos-host-real-h264-validation",
+    "04-23-hos-host-realtime-decode-display"
   ],
-  "parent": null,
+  "parent": "04-22-hos-scrcpy-brainstorm",
   "relatedFiles": [],
   "notes": "",
   "meta": {}

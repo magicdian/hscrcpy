@@ -1,0 +1,10 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "avoid per-frame spam while logging preview startup/fallback"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "surface live preview spawn and stream failures with operation context"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "keep new render path explicit and tested"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "extend existing bringup renderer instead of duplicating ingest flow"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "host session/ingest/render/display boundaries all change together"}
+{"file": "apps/hscrcpy-host-cli/src/main.rs", "reason": "CLI flags and bringup execution flow"}
+{"file": "crates/hscrcpy-host/src/render/bringup.rs", "reason": "current artifact-only H.264/JPEG presentation path"}
+{"file": "crates/hscrcpy-host/src/render/mod.rs", "reason": "render module API surface"}

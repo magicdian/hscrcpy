@@ -1,0 +1,10 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "keep device native modules aligned with capture/codec/transport boundaries"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "log startup/capability/codec fallback without per-frame spam"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "device stream path crosses ArkTS/native/media/transport boundaries"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "thin bridge and explicit capability negotiation remain required"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "surface HarmonyOS media and socket failures with operation context"}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "preserve session/video channel contract while replacing placeholders"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/transport/video_channel.cpp", "reason": "current placeholder packet loop that must be replaced or fed by real H.264 units"}
+{"file": "sources/hscrcpy_server/entry/src/main/cpp/video/h264_video_path.cpp", "reason": "current H.264 descriptor and placeholder access-unit seam"}
