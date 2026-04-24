@@ -3,8 +3,9 @@ mod bringup;
 use crate::HostResult;
 
 pub use bringup::{
-    BringupDiagnosticsSummary, BringupRenderSurface, H264LivePreviewConfig, IngressTimingSample,
-    RenderSessionDescriptor, RenderStreamStats, RenderedArtifact,
+    BringupDiagnosticsSummary, BringupRenderSurface, H264LivePreviewConfig,
+    H264StartupSnapshotMode, IngressTimingSample, RenderSessionDescriptor, RenderStreamStats,
+    RenderedArtifact,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

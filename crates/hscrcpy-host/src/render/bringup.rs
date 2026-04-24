@@ -16,11 +16,27 @@ const DEFAULT_FFPLAY_BIN: &str = "ffplay";
 const DEFAULT_FFPLAY_FRAMERATE: u16 = 120;
 const H264_DIAGNOSTIC_SUMMARY_INTERVAL: usize = 120;
 const H264_LIVE_PREVIEW_WRITE_WARN_US: u64 = 20_000;
+const H264_SYNTHETIC_SNAPSHOT_REPEAT_UNITS: usize = 120;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct H264LivePreviewConfig {
     pub ffplay_bin: String,
     pub framerate: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum H264StartupSnapshotMode {
+    SafeDropPreIdr,
+    UnsafePassthroughPreIdr,
+}
+
+impl H264StartupSnapshotMode {
+    fn as_event_value(self) -> &'static str {
+        match self {
+            Self::SafeDropPreIdr => "safe_drop_pre_idr",
+            Self::UnsafePassthroughPreIdr => "unsafe_passthrough_pre_idr",
+        }
+    }
 }
 
 impl Default for H264LivePreviewConfig {
@@ -254,6 +270,72 @@ impl BringupRenderSurface {
 
     pub fn stats(&self) -> &RenderStreamStats {
         &self.stats
+    }
+
+    pub fn present_startup_snapshot_idr(
+        &mut self,
+        snapshot_path: &Path,
+        access_unit: &H264AccessUnit,
+        mode: H264StartupSnapshotMode,
+    ) -> HostResult<()> {
+        let session_dir = self.require_session_dir()?;
+        let latest_path = session_dir.join("latest.jpg");
+        fs::copy(snapshot_path, &latest_path).map_err(|error| {
+            io_error(
+                "copy startup snapshot into latest preview artifact",
+                &latest_path,
+                error,
+            )
+        })?;
+
+        let h264_path = session_dir.join("startup-snapshot-idr.h264");
+        fs::write(&h264_path, &access_unit.encoded_bytes)
+            .map_err(|error| io_error("write startup snapshot h264 idr", &h264_path, error))?;
+        let profile = h264::access_unit_profile(&access_unit.encoded_bytes)?;
+        if !profile.has_idr {
+            return Err(HostError::RenderFailure(format!(
+                "startup snapshot idr payload must include IDR, got nals={} types={}",
+                profile.nal_count,
+                profile.nal_types_csv()
+            )));
+        }
+
+        self.append_event_note(&format!(
+            "synthetic_snapshot_idr mode={} repeat_units={} snapshot={} h264={} payload_bytes={} h264_nals={} h264_sps={} h264_pps={} h264_idr={} h264_types={}",
+            mode.as_event_value(),
+            H264_SYNTHETIC_SNAPSHOT_REPEAT_UNITS,
+            latest_path.display(),
+            h264_path.display(),
+            access_unit.encoded_bytes.len(),
+            profile.nal_count,
+            profile.has_sps,
+            profile.has_pps,
+            profile.has_idr,
+            profile.nal_types_csv()
+        ))?;
+
+        if let Some(preview) = self.h264_live_preview.as_mut() {
+            match preview.present_synthetic_snapshot_idr(
+                access_unit,
+                mode,
+                H264_SYNTHETIC_SNAPSHOT_REPEAT_UNITS,
+            ) {
+                Ok(metrics) => {
+                    if let Some(note) = metrics.event_note {
+                        self.append_event_note(&note)?;
+                    }
+                }
+                Err(error) => {
+                    self.h264_live_preview = None;
+                    self.live_preview_status = Some(format!("disabled: {error}"));
+                    self.append_event_note(&format!(
+                        "live_preview status=disabled reason={error}"
+                    ))?;
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub fn present_video_ingress(
@@ -558,8 +640,12 @@ struct H264LivePreview {
     command_args: Vec<String>,
     child: Child,
     stdin: Option<ChildStdin>,
-    received_keyframe: bool,
+    received_official_keyframe: bool,
+    synthetic_snapshot_presented: bool,
+    startup_snapshot_mode: H264StartupSnapshotMode,
     logged_waiting_for_keyframe: bool,
+    logged_official_pre_idr_dropped: bool,
+    logged_official_pre_idr_passthrough: bool,
     logged_preview_started: bool,
     pending_decoder_config: Vec<u8>,
 }
@@ -806,8 +892,12 @@ impl H264LivePreview {
             command_args: args,
             child,
             stdin: Some(stdin),
-            received_keyframe: false,
+            received_official_keyframe: false,
+            synthetic_snapshot_presented: false,
+            startup_snapshot_mode: H264StartupSnapshotMode::SafeDropPreIdr,
             logged_waiting_for_keyframe: false,
+            logged_official_pre_idr_dropped: false,
+            logged_official_pre_idr_passthrough: false,
             logged_preview_started: false,
             pending_decoder_config: Vec::new(),
         })
@@ -824,14 +914,88 @@ impl H264LivePreview {
             .join(" ")
     }
 
+    fn present_synthetic_snapshot_idr(
+        &mut self,
+        access_unit: &H264AccessUnit,
+        mode: H264StartupSnapshotMode,
+        repeat_units: usize,
+    ) -> HostResult<H264LivePreviewMetrics> {
+        let profile = h264::access_unit_profile(&access_unit.encoded_bytes)?;
+        if !profile.has_idr {
+            return Err(HostError::RenderFailure(format!(
+                "synthetic startup snapshot must include IDR before ffplay write, got types={}",
+                profile.nal_types_csv()
+            )));
+        }
+        if repeat_units == 0 {
+            return Err(HostError::ContractViolation(
+                "synthetic startup snapshot repeat_units must be positive".to_string(),
+            ));
+        }
+
+        let write_started_at = Instant::now();
+        for _ in 0..repeat_units {
+            self.write_access_unit_bytes_without_timer(&access_unit.encoded_bytes)?;
+        }
+        self.synthetic_snapshot_presented = true;
+        self.startup_snapshot_mode = mode;
+        Ok(H264LivePreviewMetrics {
+            write_duration_us: Some(duration_to_u64_micros(write_started_at.elapsed())),
+            event_note: Some(format!(
+                "live_preview status=synthetic_snapshot_idr mode={} repeat_units={} payload_bytes={} total_bytes={} h264_sps={} h264_pps={} h264_idr={} h264_types={}",
+                mode.as_event_value(),
+                repeat_units,
+                access_unit.encoded_bytes.len(),
+                access_unit.encoded_bytes.len().saturating_mul(repeat_units),
+                profile.has_sps,
+                profile.has_pps,
+                profile.has_idr,
+                profile.nal_types_csv()
+            )),
+        })
+    }
+
     fn present_access_unit(
         &mut self,
         access_unit: &H264AccessUnit,
     ) -> HostResult<H264LivePreviewMetrics> {
-        if !self.received_keyframe && !access_unit.is_keyframe {
+        if !self.received_official_keyframe && !access_unit.is_keyframe {
             let config = h264::decoder_config_bytes(&access_unit.encoded_bytes)?;
             if !config.is_empty() {
                 self.pending_decoder_config = config;
+            }
+            if self.synthetic_snapshot_presented
+                && self.startup_snapshot_mode == H264StartupSnapshotMode::UnsafePassthroughPreIdr
+            {
+                let write_duration_us = self.write_access_unit_bytes(&access_unit.encoded_bytes)?;
+                let should_log = !self.logged_official_pre_idr_passthrough;
+                self.logged_official_pre_idr_passthrough = true;
+                return Ok(H264LivePreviewMetrics {
+                    write_duration_us: Some(write_duration_us),
+                    event_note: should_log.then(|| {
+                        format!(
+                            "live_preview status=official_pre_idr_passthrough mode={} payload_bytes={} decoder_config_cached_bytes={}",
+                            self.startup_snapshot_mode.as_event_value(),
+                            access_unit.encoded_bytes.len(),
+                            self.pending_decoder_config.len()
+                        )
+                    }),
+                });
+            }
+            if self.synthetic_snapshot_presented {
+                let should_log = !self.logged_official_pre_idr_dropped;
+                self.logged_official_pre_idr_dropped = true;
+                return Ok(H264LivePreviewMetrics {
+                    write_duration_us: None,
+                    event_note: should_log.then(|| {
+                        format!(
+                            "live_preview status=official_pre_idr_dropped mode={} payload_bytes={} decoder_config_cached_bytes={}",
+                            self.startup_snapshot_mode.as_event_value(),
+                            access_unit.encoded_bytes.len(),
+                            self.pending_decoder_config.len()
+                        )
+                    }),
+                });
             }
             let should_log = !self.logged_waiting_for_keyframe;
             self.logged_waiting_for_keyframe = true;
@@ -846,24 +1010,24 @@ impl H264LivePreview {
             });
         }
         let mut decoder_config_bytes = 0usize;
-        if !self.received_keyframe {
+        if !self.received_official_keyframe {
             let config = h264::decoder_config_bytes(&access_unit.encoded_bytes)?;
             if !config.is_empty() {
                 self.pending_decoder_config.clear();
             } else {
                 decoder_config_bytes = self.pending_decoder_config.len();
             }
-            self.received_keyframe = true;
+            self.received_official_keyframe = true;
         }
 
-        let stdin = self.stdin.as_mut().ok_or_else(|| {
-            HostError::RenderFailure(format!(
-                "live preview command `{}` stdin is unavailable",
-                self.command_path
-            ))
-        })?;
         let write_started_at = Instant::now();
         if !self.pending_decoder_config.is_empty() {
+            let stdin = self.stdin.as_mut().ok_or_else(|| {
+                HostError::RenderFailure(format!(
+                    "live preview command `{}` stdin is unavailable",
+                    self.command_path
+                ))
+            })?;
             stdin
                 .write_all(&self.pending_decoder_config)
                 .map_err(|error| {
@@ -874,28 +1038,44 @@ impl H264LivePreview {
                 })?;
             self.pending_decoder_config.clear();
         }
-        stdin
-            .write_all(&access_unit.encoded_bytes)
-            .and_then(|_| stdin.flush())
-            .map_err(|error| {
-                HostError::RenderFailure(format!(
-                    "write h264 access unit into live preview command `{}` failed: {error}",
-                    self.command_path
-                ))
-            })?;
+        self.write_access_unit_bytes_without_timer(&access_unit.encoded_bytes)?;
         let should_log_started = !self.logged_preview_started;
         self.logged_preview_started = true;
         Ok(H264LivePreviewMetrics {
             write_duration_us: Some(duration_to_u64_micros(write_started_at.elapsed())),
             event_note: should_log_started.then(|| {
                 format!(
-                    "live_preview status=started keyframe={} decoder_config_bytes={} access_unit_bytes={}",
+                    "live_preview status=started source=official keyframe={} decoder_config_bytes={} access_unit_bytes={}",
                     access_unit.is_keyframe,
                     decoder_config_bytes,
                     access_unit.encoded_bytes.len()
                 )
             }),
         })
+    }
+
+    fn write_access_unit_bytes(&mut self, bytes: &[u8]) -> HostResult<u64> {
+        let write_started_at = Instant::now();
+        self.write_access_unit_bytes_without_timer(bytes)?;
+        Ok(duration_to_u64_micros(write_started_at.elapsed()))
+    }
+
+    fn write_access_unit_bytes_without_timer(&mut self, bytes: &[u8]) -> HostResult<()> {
+        let stdin = self.stdin.as_mut().ok_or_else(|| {
+            HostError::RenderFailure(format!(
+                "live preview command `{}` stdin is unavailable",
+                self.command_path
+            ))
+        })?;
+        stdin
+            .write_all(bytes)
+            .and_then(|_| stdin.flush())
+            .map_err(|error| {
+                HostError::RenderFailure(format!(
+                    "write h264 access unit into live preview command `{}` failed: {error}",
+                    self.command_path
+                ))
+            })
     }
 }
 
@@ -1010,7 +1190,9 @@ fn format_optional_bool(value: Option<bool>) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{BringupRenderSurface, IngressTimingSample, RenderSessionDescriptor};
+    use super::{
+        BringupRenderSurface, H264StartupSnapshotMode, IngressTimingSample, RenderSessionDescriptor,
+    };
     use crate::render::JpegFrame;
     use crate::video::{h264::H264AccessUnit, PreparedVideoIngress};
     use hscrcpy_contracts::VideoCodec;
@@ -1161,6 +1343,42 @@ mod tests {
             fs::read(session_dir.join("stream.h264")).expect("stream artifact should exist"),
             vec![0, 0, 0, 1, 1, 2, 3, 4]
         );
+    }
+
+    #[test]
+    fn startup_snapshot_idr_writes_placeholder_artifacts_without_counting_official_frames() {
+        let temp = TestDir::new("startup-snapshot");
+        let snapshot_path = temp.path().join("captured.jpg");
+        fs::write(&snapshot_path, vec![0xff, 0xd8, 0xff, 0xd9])
+            .expect("snapshot fixture should write");
+        let mut surface = BringupRenderSurface::new(temp.path());
+        surface
+            .initialize_session(session(VideoCodec::H264))
+            .expect("render surface should initialize");
+
+        surface
+            .present_startup_snapshot_idr(
+                &snapshot_path,
+                &H264AccessUnit {
+                    timestamp_micros: 0,
+                    is_keyframe: true,
+                    encoded_bytes: vec![0, 0, 1, 0x67, 1, 0, 0, 1, 0x68, 1, 0, 0, 1, 0x65, 1],
+                },
+                H264StartupSnapshotMode::SafeDropPreIdr,
+            )
+            .expect("startup snapshot idr should render as placeholder");
+
+        let session_dir = surface.session_dir().expect("session dir should exist");
+        assert_eq!(
+            fs::read(session_dir.join("latest.jpg")).expect("latest snapshot should exist"),
+            vec![0xff, 0xd8, 0xff, 0xd9]
+        );
+        assert!(session_dir.join("startup-snapshot-idr.h264").exists());
+        assert_eq!(surface.stats().h264_access_units, 0);
+        let events =
+            fs::read_to_string(session_dir.join("events.log")).expect("events log should exist");
+        assert!(events.contains("synthetic_snapshot_idr mode=safe_drop_pre_idr"));
+        assert!(events.contains("repeat_units=120"));
     }
 
     #[test]

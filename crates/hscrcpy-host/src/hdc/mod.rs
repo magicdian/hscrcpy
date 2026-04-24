@@ -28,6 +28,12 @@ pub trait HdcBridge {
             local_path.display()
         )))
     }
+    fn recv_file(&self, _device_id: &str, remote_path: &str, local_path: &Path) -> HostResult<()> {
+        Err(HostError::ContractViolation(format!(
+            "hdc bridge does not support file recv from {remote_path} to {}",
+            local_path.display()
+        )))
+    }
     fn exec_shell(&self, device_id: &str, command: &str) -> HostResult<String>;
 }
 
@@ -329,6 +335,28 @@ impl HdcBridge for RuntimeHdcBridge {
         Ok(())
     }
 
+    fn recv_file(&self, device_id: &str, remote_path: &str, local_path: &Path) -> HostResult<()> {
+        let device_id = validate_device_id(device_id)?;
+        let remote_path = remote_path.trim();
+        if remote_path.is_empty() {
+            return Err(HostError::ContractViolation(
+                "hdc file recv requires a non-empty remote path".to_string(),
+            ));
+        }
+
+        let resolved_target = self.resolve_device_target(device_id)?;
+        let args = vec![
+            "-t".to_string(),
+            resolved_target.clone(),
+            "file".to_string(),
+            "recv".to_string(),
+            remote_path.to_string(),
+            local_recv_target_arg(local_path),
+        ];
+        self.run_checked("file recv", Some(&resolved_target), &args)?;
+        Ok(())
+    }
+
     fn exec_shell(&self, device_id: &str, command: &str) -> HostResult<String> {
         let device_id = validate_device_id(device_id)?;
         let command = command.trim();
@@ -379,6 +407,14 @@ fn is_empty_target_marker(line: &str) -> bool {
     normalized == "[empty]" || normalized == "empty"
 }
 
+fn local_recv_target_arg(path: &Path) -> String {
+    let mut value = path.display().to_string();
+    if path.is_dir() && !value.ends_with(std::path::MAIN_SEPARATOR) {
+        value.push(std::path::MAIN_SEPARATOR);
+    }
+    value
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct StubHdcBridge;
 
@@ -393,6 +429,10 @@ impl HdcBridge for StubHdcBridge {
 
     fn push_file(&self, device_id: &str, local_path: &Path, remote_path: &str) -> HostResult<()> {
         RuntimeHdcBridge::default().push_file(device_id, local_path, remote_path)
+    }
+
+    fn recv_file(&self, device_id: &str, remote_path: &str, local_path: &Path) -> HostResult<()> {
+        RuntimeHdcBridge::default().recv_file(device_id, remote_path, local_path)
     }
 
     fn exec_shell(&self, device_id: &str, command: &str) -> HostResult<String> {
@@ -603,6 +643,36 @@ mod tests {
                     "send".to_string(),
                     "third_party/payload.so".to_string(),
                     "/data/local/tmp/scrcpy_server.so".to_string(),
+                ],
+            )]
+        );
+    }
+
+    #[test]
+    fn recv_file_uses_hdc_file_recv() {
+        let runner = MockRunner::with_scripted_results(vec![success("")]);
+        let bridge = RuntimeHdcBridge::with_runner("hdc-test", runner.clone());
+        let temp_dir = std::env::temp_dir();
+
+        bridge
+            .recv_file("SERIAL_A", "/data/local/tmp/startup.jpg", &temp_dir)
+            .expect("file recv should succeed");
+
+        let mut expected_local_arg = temp_dir.display().to_string();
+        if !expected_local_arg.ends_with(std::path::MAIN_SEPARATOR) {
+            expected_local_arg.push(std::path::MAIN_SEPARATOR);
+        }
+        assert_eq!(
+            runner.invocations(),
+            vec![(
+                "hdc-test".to_string(),
+                vec![
+                    "-t".to_string(),
+                    "SERIAL_A".to_string(),
+                    "file".to_string(),
+                    "recv".to_string(),
+                    "/data/local/tmp/startup.jpg".to_string(),
+                    expected_local_arg,
                 ],
             )]
         );

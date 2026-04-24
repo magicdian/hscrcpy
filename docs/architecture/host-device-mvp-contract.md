@@ -156,15 +156,18 @@ Use this contract when improving static-screen startup visibility for `--route u
   * gRPC method: `/ScrcpyService/onRequestIDRFrame`
   * host log operations: `official_scrcpy_request_idr`, `official_scrcpy_request_idr_failed`
 * Future startup snapshot fallback:
-  * proposed CLI flag: `--uitest-startup-snapshot-idr`
+  * CLI flag: `--uitest-startup-snapshot-idr`
+  * optional encoder override: `--ffmpeg-bin <path>`
+  * unsafe diagnostic flag: `--uitest-startup-snapshot-passthrough-pre-idr`
   * artifact: `<session_dir>/latest.jpg`
-  * optional synthetic H.264 payload: one Annex-B SPS/PPS/IDR access unit encoded from the snapshot
+  * synthetic H.264 payload: one Annex-B SPS/PPS/IDR access unit encoded from the snapshot
 
 #### Contracts
 
 * Official `uitest` H.264 may start with SPS/PPS only and must not be considered decodable until an official IDR NAL arrives.
 * A snapshot-derived synthetic IDR may be used only as a visual placeholder before the official stream becomes decodable.
 * A snapshot-derived synthetic IDR must never be used as the reference frame for subsequent official non-IDR units. Host must keep dropping/caching official non-IDR units until an official IDR arrives.
+* `--uitest-startup-snapshot-passthrough-pre-idr` is an explicit unsafe real-device experiment. It may feed official pre-IDR non-IDR units after the synthetic snapshot IDR, but output corruption, stalls, or decoder warnings are expected outcomes and must not redefine the safe contract.
 * After the official IDR arrives, ffplay/live-preview ownership switches to the official stream; subsequent units must be from the same official encoder sequence.
 
 #### Validation & Error Matrix
@@ -173,7 +176,8 @@ Use this contract when improving static-screen startup visibility for `--route u
 |---|---|---|
 | First official unit has SPS/PPS but no IDR | Cache decoder config and wait | `live_preview status=waiting_for_keyframe` |
 | Synthetic snapshot IDR is emitted | Display as placeholder only | event note should mark synthetic source |
-| Official non-IDR arrives before official IDR | Do not feed it after synthetic IDR | host continues waiting for official keyframe |
+| Official non-IDR arrives before official IDR in safe mode | Do not feed it after synthetic IDR | `live_preview status=official_pre_idr_dropped` |
+| Official non-IDR arrives before official IDR in unsafe passthrough mode | Feed it only because explicit unsafe flag was set | `live_preview status=official_pre_idr_passthrough` |
 | Official IDR arrives | Feed official SPS/PPS/IDR and switch to official stream | `h264_idr=true` in `events.log` |
 | Synthetic encoder dimensions differ from official stream | Prefer preview.html/JPEG fallback or expect decoder reconfigure | visible flash/reconfigure; do not treat as transport bug |
 
@@ -182,14 +186,18 @@ Use this contract when improving static-screen startup visibility for `--route u
 * Good: snapshot placeholder displays immediately, official non-IDR units are withheld, and official IDR switches the stream cleanly.
 * Base: no snapshot fallback is enabled; host waits for official IDR as it does today.
 * Bad: host encodes a screenshot into IDR and then feeds official P frames before any official IDR. The decoder reference state does not match the official encoder's DPB and may produce corruption or stalls.
+* Diagnostic-only: the same bad sequence is permitted when `--uitest-startup-snapshot-passthrough-pre-idr` is explicitly set, and logs must label it as unsafe passthrough.
 
 #### Tests Required
 
 * Unit test: official SPS/PPS-only message remains non-keyframe and live preview waits.
-* Unit test for future snapshot fallback: synthetic IDR does not set the official stream as ready for official P frames.
+* Unit test for snapshot fallback: synthetic IDR does not count as an official frame or official stream keyframe.
+* Unit test for snapshot fallback CLI parsing and HDC file receive command shape.
 * Manual real-device test:
   * `--route uitest --codec h264` on a static screen waits for official IDR.
   * `--uitest-request-idr-on-start` logs request result without failing startup.
+  * `--uitest-startup-snapshot-idr` shows a synthetic placeholder and then waits for official IDR.
+  * `--uitest-startup-snapshot-idr --uitest-startup-snapshot-passthrough-pre-idr` labels official pre-IDR writes as unsafe passthrough.
 
 #### Wrong vs Correct
 
@@ -203,6 +211,12 @@ Correct:
 
 ```text
 synthetic_snapshot_idr_placeholder -> drop official non-IDR -> official_sps_pps_idr -> official_p_frame
+```
+
+Unsafe diagnostic-only:
+
+```text
+synthetic_snapshot_idr_placeholder -> official_non_idr_passthrough -> official_sps_pps_idr -> official_p_frame
 ```
 
 ### 4.2 Session Channel Messages

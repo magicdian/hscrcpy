@@ -1,0 +1,5 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check.md", "reason": "Code quality check spec"}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "verify static fallback contract stays explicit"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "verify host backend placement"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "verify diagnostics are clear and not frame-spam"}

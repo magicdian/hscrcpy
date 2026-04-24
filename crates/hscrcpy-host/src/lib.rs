@@ -8,6 +8,7 @@ pub mod official_scrcpy;
 pub mod render;
 pub mod route;
 pub mod session;
+pub mod startup_snapshot;
 pub mod uitest;
 pub mod video;
 

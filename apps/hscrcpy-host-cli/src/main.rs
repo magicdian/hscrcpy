@@ -1,10 +1,15 @@
 use hscrcpy_contracts::{SessionStartRequest, VideoCodec};
+use hscrcpy_host::hdc::RuntimeHdcBridge;
 use hscrcpy_host::render::{
-    BringupDiagnosticsSummary, BringupRenderSurface, H264LivePreviewConfig, IngressTimingSample,
-    RenderSessionDescriptor,
+    BringupDiagnosticsSummary, BringupRenderSurface, H264LivePreviewConfig,
+    H264StartupSnapshotMode, IngressTimingSample, RenderSessionDescriptor,
 };
 use hscrcpy_host::route::HostRoute;
 use hscrcpy_host::session::{SessionBootstrap, SessionOrchestrator};
+use hscrcpy_host::startup_snapshot::{
+    capture_startup_snapshot, encode_snapshot_as_h264_idr, StartupSnapshotCapture,
+    SyntheticSnapshotIdrConfig,
+};
 use hscrcpy_host::uitest::{UitestLaunchConfig, UitestLaunchFlavor};
 use hscrcpy_host::{HostError, HostResult};
 use std::env;
@@ -27,10 +32,13 @@ struct CliOptions {
     live_preview: bool,
     record_h264: bool,
     ffplay_bin: String,
+    ffmpeg_bin: String,
     output_dir: PathBuf,
     uitest_payload: Option<PathBuf>,
     uitest_flavor: UitestLaunchFlavor,
     uitest_request_idr_on_start: bool,
+    uitest_startup_snapshot_idr: bool,
+    uitest_startup_snapshot_passthrough_pre_idr: bool,
 }
 
 impl Default for CliOptions {
@@ -45,10 +53,13 @@ impl Default for CliOptions {
             live_preview: true,
             record_h264: false,
             ffplay_bin: "ffplay".to_string(),
+            ffmpeg_bin: "ffmpeg".to_string(),
             output_dir: PathBuf::from("target/host-render-bringup"),
             uitest_payload: None,
             uitest_flavor: UitestLaunchFlavor::Scrcpy,
             uitest_request_idr_on_start: false,
+            uitest_startup_snapshot_idr: false,
+            uitest_startup_snapshot_passthrough_pre_idr: false,
         }
     }
 }
@@ -75,6 +86,8 @@ fn run() -> Result<(), String> {
 
 fn run_bringup(options: CliOptions, interrupt: InterruptFlag) -> HostResult<()> {
     let startup_started_at = Instant::now();
+    validate_startup_snapshot_options(&options)?;
+    let startup_snapshot = prepare_startup_snapshot_capture(&options)?;
     let mut uitest_config = UitestLaunchConfig::for_flavor(options.uitest_flavor);
     uitest_config.payload_override = options.uitest_payload.clone();
     let orchestrator =
@@ -95,6 +108,30 @@ fn run_bringup(options: CliOptions, interrupt: InterruptFlag) -> HostResult<()> 
     };
     request.request_official_idr_on_start = options.uitest_request_idr_on_start;
     let bootstrap = SessionBootstrap::new(&options.device_id, request, options.route);
+    let mut surface = if options.live_preview && options.requested_codec == VideoCodec::H264 {
+        BringupRenderSurface::new(&options.output_dir).with_h264_live_preview(
+            H264LivePreviewConfig {
+                ffplay_bin: options.ffplay_bin.clone(),
+                framerate: options.preferred_max_fps,
+            },
+        )
+    } else {
+        BringupRenderSurface::new(&options.output_dir)
+    };
+    if options.record_h264 {
+        surface = surface.with_h264_artifact_recording();
+    }
+    let mut surface_initialized = false;
+    if let Some(snapshot) = startup_snapshot.as_ref() {
+        surface.initialize_session(RenderSessionDescriptor {
+            session_id: host_session_id(&options.device_id),
+            selected_codec: VideoCodec::H264,
+            display_width: 0,
+            display_height: 0,
+        })?;
+        surface_initialized = true;
+        present_startup_snapshot_idr(&mut surface, snapshot, &options, 0, 0)?;
+    }
     println!(
         "startup phase=route_start_begin elapsed_ms=0 route={} device={} codec={} fps={} uitest_flavor={}",
         options.route,
@@ -122,25 +159,24 @@ fn run_bringup(options: CliOptions, interrupt: InterruptFlag) -> HostResult<()> 
             .saturating_duration_since(startup_started_at)
             .as_millis()
     );
-    let mut surface = if options.live_preview && options.requested_codec == VideoCodec::H264 {
-        BringupRenderSurface::new(&options.output_dir).with_h264_live_preview(
-            H264LivePreviewConfig {
-                ffplay_bin: options.ffplay_bin.clone(),
-                framerate: options.preferred_max_fps,
-            },
-        )
-    } else {
-        BringupRenderSurface::new(&options.output_dir)
-    };
-    if options.record_h264 {
-        surface = surface.with_h264_artifact_recording();
+    if !surface_initialized {
+        surface.initialize_session(RenderSessionDescriptor {
+            session_id: plan.response.session_id.clone(),
+            selected_codec: plan.response.selected_codec.clone(),
+            display_width: u32::from(plan.negotiation.session_ready.display.width),
+            display_height: u32::from(plan.negotiation.session_ready.display.height),
+        })?;
+    } else if plan.response.session_id != host_session_id(&options.device_id) {
+        let error = HostError::ContractViolation(format!(
+            "startup snapshot preview session `{}` does not match official session `{}`",
+            host_session_id(&options.device_id),
+            plan.response.session_id
+        ));
+        let _ = plan
+            .runtime
+            .stop(Some(format!("startup snapshot session mismatch: {error}")));
+        return Err(error);
     }
-    surface.initialize_session(RenderSessionDescriptor {
-        session_id: plan.response.session_id.clone(),
-        selected_codec: plan.response.selected_codec.clone(),
-        display_width: u32::from(plan.negotiation.session_ready.display.width),
-        display_height: u32::from(plan.negotiation.session_ready.display.height),
-    })?;
     let render_ready_at = Instant::now();
     println!(
         "startup phase=render_ready elapsed_ms={} phase_ms={}",
@@ -224,6 +260,92 @@ fn run_bringup(options: CliOptions, interrupt: InterruptFlag) -> HostResult<()> 
         println!("latest artifact: {}", path.display());
     }
     Ok(())
+}
+
+fn validate_startup_snapshot_options(options: &CliOptions) -> HostResult<()> {
+    if options.uitest_startup_snapshot_passthrough_pre_idr && !options.uitest_startup_snapshot_idr {
+        return Err(HostError::ContractViolation(
+            "--uitest-startup-snapshot-passthrough-pre-idr requires --uitest-startup-snapshot-idr"
+                .to_string(),
+        ));
+    }
+    if options.uitest_startup_snapshot_idr {
+        if options.route != HostRoute::Uitest || options.requested_codec != VideoCodec::H264 {
+            return Err(HostError::ContractViolation(
+                "--uitest-startup-snapshot-idr is only supported with --route uitest --codec h264"
+                    .to_string(),
+            ));
+        }
+        if !options.live_preview {
+            return Err(HostError::ContractViolation(
+                "--uitest-startup-snapshot-idr requires live preview to feed ffplay".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn prepare_startup_snapshot_capture(
+    options: &CliOptions,
+) -> HostResult<Option<StartupSnapshotCapture>> {
+    if !options.uitest_startup_snapshot_idr {
+        return Ok(None);
+    }
+    let snapshot_path = options.output_dir.join("startup-snapshot.jpg");
+    let hdc = RuntimeHdcBridge::new();
+    let snapshot = capture_startup_snapshot(&hdc, &options.device_id, &snapshot_path)?;
+    println!(
+        "startup phase=uitest_startup_snapshot_capture local={} remote={}",
+        snapshot.local_path.display(),
+        snapshot.remote_path
+    );
+    let _ = io::stdout().flush();
+    Ok(Some(snapshot))
+}
+
+fn present_startup_snapshot_idr(
+    surface: &mut BringupRenderSurface,
+    snapshot: &StartupSnapshotCapture,
+    options: &CliOptions,
+    display_width: u32,
+    display_height: u32,
+) -> HostResult<()> {
+    let synthetic_idr = encode_snapshot_as_h264_idr(&SyntheticSnapshotIdrConfig {
+        ffmpeg_bin: options.ffmpeg_bin.clone(),
+        input_path: snapshot.local_path.clone(),
+        display_width,
+        display_height,
+        framerate: options.preferred_max_fps,
+    })?;
+    let mode = if options.uitest_startup_snapshot_passthrough_pre_idr {
+        H264StartupSnapshotMode::UnsafePassthroughPreIdr
+    } else {
+        H264StartupSnapshotMode::SafeDropPreIdr
+    };
+    surface.present_startup_snapshot_idr(&snapshot.local_path, &synthetic_idr, mode)?;
+    println!(
+        "startup phase=uitest_startup_snapshot_idr mode={} snapshot={} payload_bytes={}",
+        match mode {
+            H264StartupSnapshotMode::SafeDropPreIdr => "safe_drop_pre_idr",
+            H264StartupSnapshotMode::UnsafePassthroughPreIdr => "unsafe_passthrough_pre_idr",
+        },
+        snapshot.local_path.display(),
+        synthetic_idr.encoded_bytes.len()
+    );
+    let _ = io::stdout().flush();
+    Ok(())
+}
+
+fn host_session_id(device_id: &str) -> String {
+    let sanitized = device_id
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "host-session-unknown-device".to_string()
+    } else {
+        format!("host-session-{sanitized}")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -365,6 +487,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<CliOptions, String> 
             "--ffplay-bin" => {
                 options.ffplay_bin = next_value(&mut args, "--ffplay-bin")?;
             }
+            "--ffmpeg-bin" => {
+                options.ffmpeg_bin = next_value(&mut args, "--ffmpeg-bin")?;
+            }
             "--output-dir" => {
                 options.output_dir = PathBuf::from(next_value(&mut args, "--output-dir")?);
             }
@@ -378,6 +503,12 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<CliOptions, String> 
             }
             "--uitest-request-idr-on-start" => {
                 options.uitest_request_idr_on_start = true;
+            }
+            "--uitest-startup-snapshot-idr" => {
+                options.uitest_startup_snapshot_idr = true;
+            }
+            "--uitest-startup-snapshot-passthrough-pre-idr" => {
+                options.uitest_startup_snapshot_passthrough_pre_idr = true;
             }
             "--no-control" => {
                 options.enable_control = false;
@@ -495,12 +626,13 @@ fn print_usage() {
 }
 
 fn usage_text() -> &'static str {
-    "Usage: hscrcpy-host-cli [--device <id>] [--route <uitest|hscrcpy-server>] [--codec <h264|jpeg>] [--fps <n>] [--max-frames <n>] [--output-dir <path>] [--ffplay-bin <path>] [--uitest-flavor <scrcpy|recorder>] [--uitest-payload <path>] [--uitest-request-idr-on-start] [--no-control] [--no-live-preview] [--record-h264]\n\
+    "Usage: hscrcpy-host-cli [--device <id>] [--route <uitest|hscrcpy-server>] [--codec <h264|jpeg>] [--fps <n>] [--max-frames <n>] [--output-dir <path>] [--ffplay-bin <path>] [--ffmpeg-bin <path>] [--uitest-flavor <scrcpy|recorder>] [--uitest-payload <path>] [--uitest-request-idr-on-start] [--uitest-startup-snapshot-idr] [--uitest-startup-snapshot-passthrough-pre-idr] [--no-control] [--no-live-preview] [--record-h264]\n\
 \n\
-Starts a host session, captures negotiated video ingress, and streams H.264 mainline packets into a realtime ffplay preview by default. --fps also sets ffplay's raw H.264 input framerate. Use --record-h264 to additionally write per-frame .h264 diagnostics and stream.h264. --uitest-request-idr-on-start is an experimental best-effort ScrcpyService/onRequestIDRFrame call for static official uitest streams.\n\
+Starts a host session, captures negotiated video ingress, and streams H.264 mainline packets into a realtime ffplay preview by default. --fps also sets ffplay's raw H.264 input framerate. Use --record-h264 to additionally write per-frame .h264 diagnostics and stream.h264. --uitest-request-idr-on-start is an experimental best-effort ScrcpyService/onRequestIDRFrame call for static official uitest streams. --uitest-startup-snapshot-idr captures a pre-stream device screenshot, encodes it with ffmpeg as a synthetic H.264 IDR placeholder, and feeds it to ffplay before official IDR arrives. --uitest-startup-snapshot-passthrough-pre-idr is an unsafe experiment that also feeds official pre-IDR non-IDR units after the synthetic placeholder.\n\
 \n\
 Examples:\n\
   hscrcpy-host-cli --device auto --route uitest --codec h264 --uitest-payload third_party/hypium/hosScrcpy/6.1.0.210/libscrcpy/libscrcpy_server_unix_6.5-20260313.z.so\n\
+  hscrcpy-host-cli --device auto --route uitest --codec h264 --uitest-startup-snapshot-idr --ffmpeg-bin /opt/homebrew/bin/ffmpeg --ffplay-bin /opt/homebrew/bin/ffplay\n\
   hscrcpy-host-cli --device auto --route uitest --codec h264 --uitest-flavor recorder --ffplay-bin /opt/homebrew/bin/ffplay\n\
   hscrcpy-host-cli --device auto --route hscrcpy-server --codec h264\n\
   hscrcpy-host-cli --device auto --route hscrcpy-server --codec h264 --max-frames 120 --record-h264\n\
@@ -580,5 +712,24 @@ mod tests {
         )
         .expect("uitest idr flag should parse");
         assert!(options.uitest_request_idr_on_start);
+    }
+
+    #[test]
+    fn parses_startup_snapshot_flags_and_ffmpeg_bin() {
+        let options = parse_args(
+            [
+                "--uitest-startup-snapshot-idr",
+                "--uitest-startup-snapshot-passthrough-pre-idr",
+                "--ffmpeg-bin",
+                "/opt/homebrew/bin/ffmpeg",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .expect("startup snapshot flags should parse");
+
+        assert!(options.uitest_startup_snapshot_idr);
+        assert!(options.uitest_startup_snapshot_passthrough_pre_idr);
+        assert_eq!(options.ffmpeg_bin, "/opt/homebrew/bin/ffmpeg");
     }
 }

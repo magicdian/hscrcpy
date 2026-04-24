@@ -1,0 +1,9 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "startup snapshot and encoder failures need explicit phase context"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "host backend module placement and uitest route adapter boundaries"}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "official uitest static startup fallback contract"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "live preview and stream startup diagnostics must be structured"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "reuse existing HDC/rendering helpers before adding new utility functions"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "backend tests and contract updates required for new behavior"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "CLI to HDC screenshot to renderer data flow crosses boundaries"}
