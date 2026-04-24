@@ -1,0 +1,10 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check.md", "reason": "Code quality check spec"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Review file placement for host route abstractions."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Review invalid route and route startup failures for clear boundary errors."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Review tests and scope discipline for new host abstractions."}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Review route diagnostics wording and avoid noisy logs."}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Review compatibility with documented route-neutral launch and ingress contract."}
+{"file": "apps/hscrcpy-host-cli/src/main.rs", "reason": "Review CLI parser, usage text, and default route behavior."}
+{"file": "crates/hscrcpy-host/src/session/startup.rs", "reason": "Review startup route config and route-neutral session abstractions."}
+{"file": "crates/hscrcpy-host/src/companion/mod.rs", "reason": "Review HAP route compatibility after abstraction."}

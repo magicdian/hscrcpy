@@ -1,0 +1,11 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Host route abstractions must stay in Rust host/session boundaries and avoid device-side module churn."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "CLI route parsing and startup route errors must fail clearly with operation context."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Route abstraction introduces host-side structure and must include deterministic unit tests."}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Route choice must appear in diagnostics without noisy stream logs."}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Route selection is a host/device startup contract and must preserve route-neutral ingress."}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "New route/config constants should reuse existing host abstractions rather than duplicate values."}
+{"file": "apps/hscrcpy-host-cli/src/main.rs", "reason": "Existing CLI parser, codec option handling, diagnostics output, and render handoff."}
+{"file": "crates/hscrcpy-host/src/session/startup.rs", "reason": "Current startup orchestration hard-codes HAP companion manager and should receive route-neutral config."}
+{"file": "crates/hscrcpy-host/src/companion/mod.rs", "reason": "Existing HAP companion launch route must remain selectable behind the new route abstraction."}

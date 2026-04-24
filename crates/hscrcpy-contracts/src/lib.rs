@@ -7,7 +7,10 @@ mod capability;
 mod channel;
 mod session;
 
-pub use capability::{CapabilityReport, VideoCodec};
+pub use capability::{
+    CapabilityReport, CodecDescriptor, CodecName, HostVideoDecoderCapability,
+    RouteVideoEncoderCapability, VideoCodec,
+};
 pub use channel::{ChannelBinding, ChannelEndpoint, ChannelLayout, TransportKind};
 pub use session::{
     AuthorizationState, AuthorizationUpdate, ControlEvent, ControlEventType, DeviceAction,

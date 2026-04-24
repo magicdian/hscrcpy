@@ -1,0 +1,9 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check.md", "reason": "Code quality check spec"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Review route phase errors and cleanup failure behavior."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Review mock command assertions and scope discipline."}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Review localabstract fport, payload cleanup, stale process, and no fallback semantics."}
+{"file": "docs/harmony-hos-scrcpy-debug-guide.md", "reason": "Review official payload paths, process/socket names, and launch command shape."}
+{"file": "crates/hscrcpy-host/src/hdc/mod.rs", "reason": "Review HDC fport/file/shell command construction and target resolution."}
+{"file": "crates/hscrcpy-host/src/companion/mod.rs", "reason": "Review uitest route lifecycle integration and HAP route preservation."}
+{"file": "crates/hscrcpy-host/src/session/startup.rs", "reason": "Review startup flow still fails selected route without auto HAP fallback."}

@@ -1,0 +1,13 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Codec registry spans contracts and host video/session modules; keep responsibilities aligned."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Codec selection failures and fallback reasons must produce clear diagnostics."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Capability selection logic needs deterministic unit tests and scoped abstractions."}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Codec decision and fallback reason must be visible in startup diagnostics without hot-path logging."}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Shared codec names and selection helpers must be centralized rather than duplicated."}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Host/device contract requires route-neutral extensible codec registry and shared selection behavior."}
+{"file": "crates/hscrcpy-contracts/src/capability.rs", "reason": "Existing VideoCodec enum and capability report are the likely registry compatibility point."}
+{"file": "crates/hscrcpy-contracts/src/session.rs", "reason": "Session hello/config types currently carry VideoCodecDescriptor and selected codec values."}
+{"file": "crates/hscrcpy-host/src/video/mod.rs", "reason": "Existing host video path classification and packet decode behavior must stay compatible."}
+{"file": "crates/hscrcpy-host/src/session/startup.rs", "reason": "Existing codec normalization/selection should be replaced or wrapped by route-neutral registry selection."}
+{"file": "apps/hscrcpy-host-cli/src/main.rs", "reason": "CLI diagnostics should print selected codec and fallback reason while preserving route abstraction."}

@@ -1,0 +1,10 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Generated gRPC/protobuf code must stay isolated inside host official adapter modules."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Tonic transport errors must retain route, phase, target, method, payload, and codec context."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Refactor spans dependency/build, generated protocol, host startup, video ingress, CLI docs."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Protocol code needs generated-type boundary tests and regression coverage."}
+{"file": "crates/hscrcpy-host/src/official_scrcpy.rs", "reason": "Replace handwritten h2/protobuf implementation with tonic/prost generated client while preserving adapter facade."}
+{"file": "crates/hscrcpy-host/Cargo.toml", "reason": "Add standard gRPC/protobuf dependencies and remove direct handwritten h2/http/bytes dependencies if no longer needed."}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Document standard tonic/prost transport and proto provenance accurately."}
+{"file": "docs/harmony-hos-scrcpy-debug-guide.md", "reason": "Document dependency setup, proto source, and real-device validation commands."}

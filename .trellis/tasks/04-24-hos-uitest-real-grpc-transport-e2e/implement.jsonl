@@ -1,0 +1,14 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Real-device startup must fail with route/phase/method/device context and no silent fallback."}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Keep official gRPC transport isolated inside host adapter modules and avoid leaking protocol details into CLI/render."}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Streaming diagnostics should avoid per-frame spam and expose startup/teardown milestones."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Add protocol tests, integration tests with mock transport, and manual real-device validation notes."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Map data flow from gRPC stream to route-neutral H.264 ingress and ffplay preview."}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Reuse existing route lifecycle, official adapter facade, and renderer ingress instead of adding parallel paths."}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Update host-device contract when real uitest gRPC transport and E2E validation become available."}
+{"file": "docs/harmony-hos-scrcpy-debug-guide.md", "reason": "Update real-device validation commands and expected ffplay success/failure diagnostics."}
+{"file": "crates/hscrcpy-host/src/session/startup.rs", "reason": "Wire uitest route startup through real official stream and existing renderer-facing plan."}
+{"file": "crates/hscrcpy-host/src/video/mod.rs", "reason": "Reuse OfficialScrcpyIngressAdapter for H.264 normalization into PreparedVideoIngress."}
+{"file": "crates/hscrcpy-host/src/official_scrcpy.rs", "reason": "Replace deferred transport with real official ScrcpyService gRPC client while keeping protocol isolation."}
+{"file": "apps/hscrcpy-host-cli/src/main.rs", "reason": "Ensure CLI --route uitest drives the real E2E path and ffplay receives frames."}

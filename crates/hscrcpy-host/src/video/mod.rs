@@ -1,8 +1,14 @@
-use crate::{HostError, HostResult};
+use crate::{official_scrcpy::OfficialScrcpyVideoMessage, HostError, HostResult};
 use hscrcpy_contracts::VideoCodec;
 
+pub mod capability;
 pub mod h264;
 pub mod jpeg;
+
+pub use capability::{
+    normalized_requested_codec_order, select_codec_for_startup, CodecSelectionDiagnostics,
+    HostCodecCapability,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NegotiatedVideoPath {
@@ -130,14 +136,79 @@ impl PreparedVideoIngress {
             VideoCodec::H265Experimental => Ok(Self::DeferredExperimental(packet)),
         }
     }
+
+    /// Converts one official scrcpy stream message into renderer-facing ingress.
+    ///
+    /// The current official adapter facade exposes encoded bytes and codec only.
+    /// It does not expose source timestamps or keyframe flags, so callers must
+    /// provide a deterministic synthesized PTS and this conversion marks H.264
+    /// units as non-keyframes.
+    pub fn from_official_scrcpy_message(
+        message: OfficialScrcpyVideoMessage,
+        synthesized_pts_us: u64,
+    ) -> HostResult<Self> {
+        if message.codec != VideoCodec::H264 {
+            return Err(HostError::ContractViolation(format!(
+                "official scrcpy ingress only supports h264 payloads for renderer handoff, got {:?}: reply_type={} payload_key={}",
+                message.codec, message.reply_type, message.payload_key
+            )));
+        }
+
+        Self::from_packet(VideoTransportPacket::new(
+            VideoCodec::H264,
+            synthesized_pts_us,
+            false,
+            message.payload,
+        ))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfficialScrcpyIngressAdapter {
+    next_pts_us: u64,
+    pts_step_us: u64,
+}
+
+impl OfficialScrcpyIngressAdapter {
+    /// Creates a deterministic PTS synthesizer for official scrcpy messages.
+    ///
+    /// Use `pts_step_us=0` when no cadence assumption should be represented in
+    /// diagnostics. Use a fixed step only when the caller has route launch
+    /// context, such as a requested frame interval.
+    pub fn new(initial_pts_us: u64, pts_step_us: u64) -> Self {
+        Self {
+            next_pts_us: initial_pts_us,
+            pts_step_us,
+        }
+    }
+
+    pub fn untimed() -> Self {
+        Self::new(0, 0)
+    }
+
+    pub fn ingest_message(
+        &mut self,
+        message: OfficialScrcpyVideoMessage,
+    ) -> HostResult<PreparedVideoIngress> {
+        let pts_us = self.next_pts_us;
+        self.next_pts_us = self.next_pts_us.saturating_add(self.pts_step_us);
+        PreparedVideoIngress::from_official_scrcpy_message(message, pts_us)
+    }
+}
+
+impl Default for OfficialScrcpyIngressAdapter {
+    fn default() -> Self {
+        Self::untimed()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_negotiated_video_path, NegotiatedVideoPath, PreparedVideoIngress,
-        VideoTransportPacket,
+        classify_negotiated_video_path, NegotiatedVideoPath, OfficialScrcpyIngressAdapter,
+        PreparedVideoIngress, VideoTransportPacket,
     };
+    use crate::official_scrcpy::OfficialScrcpyVideoMessage;
     use hscrcpy_contracts::VideoCodec;
 
     #[test]
@@ -177,6 +248,94 @@ mod tests {
                 assert_eq!(frame.encoded_bytes, vec![9, 8, 7]);
             }
             unexpected => panic!("unexpected ingress: {unexpected:?}"),
+        }
+    }
+
+    #[test]
+    fn maps_official_h264_message_to_route_neutral_ingress() {
+        let payload = vec![0, 0, 1, 0x65, 0x88, 0x84];
+        let mut adapter = OfficialScrcpyIngressAdapter::new(1_000, 16_666);
+
+        let ingress = adapter
+            .ingest_message(official_message(VideoCodec::H264, payload.clone()))
+            .expect("official h264 payload should prepare");
+
+        match ingress {
+            PreparedVideoIngress::H264(access_unit) => {
+                assert_eq!(access_unit.timestamp_micros, 1_000);
+                assert!(!access_unit.is_keyframe);
+                assert_eq!(access_unit.encoded_bytes, payload);
+            }
+            unexpected => panic!("unexpected ingress: {unexpected:?}"),
+        }
+
+        let second = adapter
+            .ingest_message(official_message(
+                VideoCodec::H264,
+                vec![0, 0, 1, 0x41, 0x9a, 0x20],
+            ))
+            .expect("second official h264 payload should prepare");
+        match second {
+            PreparedVideoIngress::H264(access_unit) => {
+                assert_eq!(access_unit.timestamp_micros, 17_666);
+                assert!(!access_unit.is_keyframe);
+            }
+            unexpected => panic!("unexpected ingress: {unexpected:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_official_h264_payload() {
+        let err = OfficialScrcpyIngressAdapter::default()
+            .ingest_message(official_message(VideoCodec::H264, vec![0x65, 0x88, 0x84]))
+            .expect_err("non-Annex-B official payload should fail");
+
+        assert!(
+            err.to_string().contains("Annex-B"),
+            "unexpected error: {err}"
+        );
+        assert!(err.to_string().contains("h264"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn rejects_official_h264_empty_payload_before_renderer_handoff() {
+        let err = OfficialScrcpyIngressAdapter::default()
+            .ingest_message(official_message(VideoCodec::H264, Vec::new()))
+            .expect_err("empty official h264 payload should fail");
+
+        assert!(
+            err.to_string()
+                .contains("h264 access unit payload must not be empty"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_official_codec_before_renderer_handoff() {
+        let err = OfficialScrcpyIngressAdapter::default()
+            .ingest_message(official_message(
+                VideoCodec::H265Experimental,
+                vec![0, 0, 1, 0x65, 0x88, 0x84],
+            ))
+            .expect_err("non-h264 official payload should fail");
+
+        assert!(
+            err.to_string().contains("only supports h264"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains("reply_type=3"),
+            "unexpected error: {err}"
+        );
+    }
+
+    fn official_message(codec: VideoCodec, payload: Vec<u8>) -> OfficialScrcpyVideoMessage {
+        OfficialScrcpyVideoMessage {
+            codec,
+            payload_key: "payload".to_string(),
+            payload,
+            reply_type: 3,
+            data: Some("test-frame".to_string()),
         }
     }
 }

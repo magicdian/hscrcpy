@@ -1,0 +1,14 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Official gRPC/protobuf code must remain isolated in host adapter modules and not leak into CLI/render."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Adapter start/stop/IDR/stream conversion failures need route and protocol diagnostics."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Protocol conversion must have deterministic tests and keep scope out of renderer integration."}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Contract requires official uitest route to keep gRPC protocol isolated and expose route-neutral stream output."}
+{"file": "docs/harmony-hos-scrcpy-debug-guide.md", "reason": "Official scrcpy service methods, protobuf fields, socket name, and control-layer findings are documented here."}
+{"file": "crates/hscrcpy-host/src/uitest.rs", "reason": "Worker 3 added launch/forward lifecycle and constants; adapter should consume forwarded local endpoint without changing lifecycle."}
+{"file": "crates/hscrcpy-host/src/session/startup.rs", "reason": "Startup still uses HAP JSON handshake; adapter must be isolated for later route integration."}
+{"file": "crates/hscrcpy-host/src/video/mod.rs", "reason": "Adapter should expose route-neutral stream messages, not renderer-specific types."}
+{"file": "/tmp/devecotesting_610210/xdevice_devicetest-6.1.0.210-py3-none-any.whl/devicetest/controllers/tools/recorder/proto/scrcpy_pb2.py", "reason": "Observed scrcpy.proto descriptor: ReplyMessage, ParamValue, ReplyEndMessage, Empty, ScrcpyService methods."}
+{"file": "/tmp/devecotesting_610210/xdevice_devicetest-6.1.0.210-py3-none-any.whl/devicetest/controllers/tools/recorder/rpc_manager.py", "reason": "Official Python client usage: insecure channel, max receive 10MiB, onStart stream, onEnd result."}
+{"file": "Cargo.toml", "reason": "Workspace dependency policy; adding gRPC crates may be constrained by offline environment."}
+{"file": "crates/hscrcpy-host/Cargo.toml", "reason": "Host crate currently has no async/gRPC dependencies; worker must keep build reproducible."}

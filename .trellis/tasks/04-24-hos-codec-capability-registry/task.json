@@ -1,0 +1,53 @@
+{
+  "id": "hos-codec-capability-registry",
+  "name": "hos-codec-capability-registry",
+  "title": "Route-neutral codec capability registry",
+  "description": "Model route/device encoder and host decoder capabilities with an extensible codec registry while keeping H.264 as the current implementation target.",
+  "status": "completed",
+  "dev_type": "backend",
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "magicdian",
+  "assignee": "magicdian",
+  "createdAt": "2026-04-24",
+  "completedAt": "2026-04-24",
+  "branch": null,
+  "base_branch": "dev",
+  "worktree_path": null,
+  "current_phase": 0,
+  "next_action": [
+    {
+      "phase": 1,
+      "action": "brainstorm"
+    },
+    {
+      "phase": 2,
+      "action": "research"
+    },
+    {
+      "phase": 3,
+      "action": "implement"
+    },
+    {
+      "phase": 4,
+      "action": "check"
+    },
+    {
+      "phase": 5,
+      "action": "update-spec"
+    },
+    {
+      "phase": 6,
+      "action": "record-session"
+    }
+  ],
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "04-23-hos-host-launch-readiness",
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

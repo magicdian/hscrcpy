@@ -1,0 +1,6 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check.md", "reason": "Code quality check spec"}
+{"file": "Cargo.lock", "reason": "Review dependency lockfile reflects standard gRPC stack and no accidental dependency churn."}
+{"file": "crates/hscrcpy-host/src/official_scrcpy.rs", "reason": "Review generated tonic/prost boundary, stream mapping, error context, and no handcrafted duplicate protocol."}
+{"file": "docs/harmony-hos-scrcpy-debug-guide.md", "reason": "Review proto provenance wording does not overclaim public official proto source."}
+{"file": ".trellis/tasks/04-24-hos-uitest-tonic-prost-grpc/prd.md", "reason": "Review acceptance status and blocked dependency notes."}

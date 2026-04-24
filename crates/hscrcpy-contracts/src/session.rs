@@ -1,4 +1,4 @@
-use crate::{ChannelEndpoint, ChannelLayout, VideoCodec};
+use crate::{ChannelEndpoint, ChannelLayout, CodecDescriptor, CodecName, VideoCodec};
 use std::error::Error;
 use std::fmt;
 
@@ -55,6 +55,13 @@ impl SessionStartRequest {
             enable_control,
         }
     }
+
+    pub fn requested_codec_names(&self) -> Vec<CodecName> {
+        self.requested_codec_order
+            .iter()
+            .map(CodecName::from)
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +104,23 @@ pub struct VideoCodecDescriptor {
     pub bitrate_control: Option<String>,
 }
 
+impl VideoCodecDescriptor {
+    pub fn codec_name(&self) -> CodecName {
+        CodecName::from(&self.codec)
+    }
+
+    pub fn as_codec_descriptor(&self) -> CodecDescriptor {
+        CodecDescriptor {
+            codec_name: self.codec_name(),
+            encoder_kind: self.encoder_kind.clone(),
+            max_width: self.max_width,
+            max_height: self.max_height,
+            max_fps: self.max_fps,
+            bitrate_control: self.bitrate_control.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostHello {
     pub session_id: String,
@@ -107,6 +131,22 @@ pub struct HostHello {
     pub supported_video_codecs: Vec<VideoCodec>,
     pub preferred_video_codecs: Vec<VideoCodec>,
     pub video_limits: HostVideoLimits,
+}
+
+impl HostHello {
+    pub fn supported_codec_names(&self) -> Vec<CodecName> {
+        self.supported_video_codecs
+            .iter()
+            .map(CodecName::from)
+            .collect()
+    }
+
+    pub fn preferred_codec_names(&self) -> Vec<CodecName> {
+        self.preferred_video_codecs
+            .iter()
+            .map(CodecName::from)
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +172,12 @@ pub struct SessionConfig {
     pub rotation_locked: Option<bool>,
 }
 
+impl SessionConfig {
+    pub fn selected_codec_name(&self) -> CodecName {
+        CodecName::from(&self.selected_video_codec)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StopSession {
     pub session_id: String,
@@ -151,6 +197,22 @@ pub struct DeviceHello {
     pub display: DisplayInfo,
 }
 
+impl DeviceHello {
+    pub fn available_codec_descriptors(&self) -> Vec<CodecDescriptor> {
+        self.available_video_codecs
+            .iter()
+            .map(VideoCodecDescriptor::as_codec_descriptor)
+            .collect()
+    }
+
+    pub fn available_codec_names(&self) -> Vec<CodecName> {
+        self.available_video_codecs
+            .iter()
+            .map(VideoCodecDescriptor::codec_name)
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorizationUpdate {
     pub session_id: String,
@@ -164,6 +226,12 @@ pub struct SessionReady {
     pub selected_video_codec: VideoCodec,
     pub channel_layout: ChannelLayout,
     pub display: DisplayInfo,
+}
+
+impl SessionReady {
+    pub fn selected_codec_name(&self) -> CodecName {
+        CodecName::from(&self.selected_video_codec)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

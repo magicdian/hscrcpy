@@ -20,7 +20,7 @@ pub trait SessionChannelTransport {
 }
 
 pub trait VideoChannelTransport {
-    fn receive_packet(&mut self) -> HostResult<VideoTransportPacket>;
+    fn receive_video_ingress(&mut self) -> HostResult<PreparedVideoIngress>;
 }
 
 pub trait SessionTransportFactory {
@@ -88,8 +88,7 @@ impl SessionRuntime {
     }
 
     pub fn receive_video_ingress(&mut self) -> HostResult<PreparedVideoIngress> {
-        let packet = self.video_channel.receive_packet()?;
-        PreparedVideoIngress::from_packet(packet)
+        self.video_channel.receive_video_ingress()
     }
 
     pub fn stop(&mut self, reason: Option<String>) -> HostResult<()> {
@@ -195,7 +194,7 @@ impl TcpVideoChannel {
 }
 
 impl VideoChannelTransport for TcpVideoChannel {
-    fn receive_packet(&mut self) -> HostResult<VideoTransportPacket> {
+    fn receive_video_ingress(&mut self) -> HostResult<PreparedVideoIngress> {
         let mut header = [0_u8; VIDEO_PACKET_HEADER_LEN];
         self.stream.read_exact(&mut header).map_err(|error| {
             HostError::TransportFailure(format!("failed to read video packet header: {error}"))
@@ -231,7 +230,7 @@ impl VideoChannelTransport for TcpVideoChannel {
             HostError::TransportFailure(format!("failed to read video packet payload: {error}"))
         })?;
 
-        Ok(VideoTransportPacket::new(
+        PreparedVideoIngress::from_packet(VideoTransportPacket::new(
             codec,
             pts_us,
             is_keyframe,

@@ -1,0 +1,8 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check.md", "reason": "Code quality check spec"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Review phase-rich failure paths and selected-route no-fallback behavior."}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Review diagnostics text and avoid hot path log spam."}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Review final contract claims against what is actually implemented and blocked."}
+{"file": "docs/harmony-hos-scrcpy-debug-guide.md", "reason": "Review manual validation commands and documented transport blocker."}
+{"file": "crates/hscrcpy-host/src/uitest.rs", "reason": "Review lifecycle diagnostics and tests for payload/stale/cleanup/fport phases."}
+{"file": "crates/hscrcpy-host/src/official_scrcpy.rs", "reason": "Review deferred gRPC transport error and adapter tests."}

@@ -1,0 +1,7 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check.md", "reason": "Code quality check spec"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Review protocol failure mapping and unknown ReplyMessage handling."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Review conversion tests, scope boundaries, and no generated type leaks into CLI/render."}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Review route-neutral boundary and adapter isolation."}
+{"file": "crates/hscrcpy-host/src/uitest.rs", "reason": "Review adapter integration point with lifecycle constants and forwarded endpoint."}
+{"file": "crates/hscrcpy-host/src/video/mod.rs", "reason": "Review route-neutral stream output remains renderer-independent."}

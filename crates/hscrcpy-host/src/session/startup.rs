@@ -1,15 +1,25 @@
 use super::runtime::{
     endpoint_port, SessionRuntime, SessionTransportFactory, TcpSessionTransportFactory,
 };
-use crate::companion::{CompanionLaunchRequest, CompanionManager, CompanionPlan};
-use crate::hdc::HdcBridge;
-use crate::video::{classify_negotiated_video_path, NegotiatedVideoPath};
+use crate::companion::{
+    CompanionLaunchRequest, CompanionManager, CompanionPlan, RouteCompanionManager,
+};
+use crate::hdc::{HdcBridge, RuntimeHdcBridge};
+use crate::official_scrcpy::OfficialScrcpyClient;
+use crate::route::HostRoute;
+use crate::uitest::UitestLaunchConfig;
+use crate::video::{
+    classify_negotiated_video_path, normalized_requested_codec_order, select_codec_for_startup,
+    CodecSelectionDiagnostics, HostCodecCapability, NegotiatedVideoPath,
+    OfficialScrcpyIngressAdapter, PreparedVideoIngress,
+};
 use crate::{HostError, HostResult};
 use hscrcpy_contracts::{
-    AuthorizationUpdate, ChannelEndpoint, DeviceHello, FeatureAuthorization, HostHello,
-    HostVideoLimits, InboundSessionMessage, SessionConfig, SessionControlConfig,
-    SessionControlState, SessionFeature, SessionMessage, SessionReady, SessionStartRequest,
-    SessionStartResponse, SessionVideoConfig, TransportKind, VideoCodec, PROTOCOL_MAJOR_MVP,
+    AuthorizationState, AuthorizationUpdate, ChannelBinding, ChannelEndpoint, ChannelLayout,
+    DeviceHello, DisplayInfo, FeatureAuthorization, HostHello, HostVideoLimits,
+    InboundSessionMessage, SessionConfig, SessionControlConfig, SessionControlState,
+    SessionFeature, SessionMessage, SessionReady, SessionStartRequest, SessionStartResponse,
+    SessionVideoConfig, TransportKind, VideoCodec, VideoCodecDescriptor, PROTOCOL_MAJOR_MVP,
     PROTOCOL_MINOR_MVP,
 };
 
@@ -23,13 +33,19 @@ const H264_IFRAME_INTERVAL_MS: u32 = 2_000;
 pub struct SessionBootstrap {
     pub device_id: String,
     pub request: SessionStartRequest,
+    pub route: HostRoute,
 }
 
 impl SessionBootstrap {
-    pub fn new(device_id: impl Into<String>, request: SessionStartRequest) -> Self {
+    pub fn new(
+        device_id: impl Into<String>,
+        request: SessionStartRequest,
+        route: HostRoute,
+    ) -> Self {
         Self {
             device_id: device_id.into(),
             request,
+            route,
         }
     }
 }
@@ -42,8 +58,10 @@ pub struct SessionNegotiation {
 }
 
 pub struct SessionStartupPlan {
+    pub route: HostRoute,
     pub response: SessionStartResponse,
     pub negotiation: SessionNegotiation,
+    pub codec_selection: CodecSelectionDiagnostics,
     pub video_path: NegotiatedVideoPath,
     pub outbound_session_messages: Vec<SessionMessage>,
     pub runtime: SessionRuntime,
@@ -83,23 +101,41 @@ where
     }
 
     pub fn start(&self, bootstrap: &SessionBootstrap) -> HostResult<SessionStartupPlan> {
-        self.prepare(bootstrap)?;
+        let companion_plan = self.prepare(bootstrap)?;
 
-        let preferred_codec_order =
-            normalize_requested_codec_order(&bootstrap.request.requested_codec_order)?;
+        let host_codec_capability = host_codec_capability();
+        let preferred_codec_order = normalize_requested_codec_order_for_host_hello(
+            &bootstrap.request.requested_codec_order,
+            &host_codec_capability,
+        )?;
         let session_id = build_session_id(&bootstrap.device_id);
         let session_channel = session_channel_endpoint();
         let video_channel = video_channel_endpoint();
         self.companion.launch_session(
             &bootstrap.device_id,
             &CompanionLaunchRequest {
+                route: bootstrap.route,
                 session_id: session_id.clone(),
                 session_channel: session_channel.clone(),
                 video_channel: video_channel.clone(),
             },
         )?;
 
-        forward_hdc_endpoint(&self.hdc, &bootstrap.device_id, &session_channel)?;
+        if bootstrap.route == HostRoute::Uitest {
+            return start_uitest_official_stream(
+                &bootstrap.device_id,
+                &bootstrap.request,
+                &session_channel,
+                &companion_plan.artifact_hint,
+            );
+        }
+
+        forward_hdc_endpoint(
+            &self.hdc,
+            &bootstrap.device_id,
+            bootstrap.route,
+            &session_channel,
+        )?;
         let mut session_runtime = self.transport.open_session_channel(&session_channel)?;
 
         let host_hello = build_host_hello(&session_id, &bootstrap.request, &preferred_codec_order);
@@ -108,10 +144,13 @@ where
 
         let device_hello = match first_inbound {
             InboundSessionMessage::DeviceHello(message) => message,
-            InboundSessionMessage::SessionError(error) => return Err(map_session_error(&error)),
+            InboundSessionMessage::SessionError(error) => {
+                return Err(map_session_error(bootstrap.route, &error))
+            }
             unexpected => {
                 return Err(HostError::ContractViolation(format!(
-                    "expected device_hello after host_hello, got {}",
+                    "route `{}` expected device_hello after host_hello, got {}",
+                    bootstrap.route,
                     unexpected.message_type()
                 )))
             }
@@ -125,12 +164,17 @@ where
         let (authorization, authorization_updates) = wait_for_authorization(
             session_runtime.as_mut(),
             &session_id,
+            bootstrap.route,
             control_enabled,
             device_hello.authorization.clone(),
         )?;
 
-        let selected_codec =
-            select_codec(&preferred_codec_order, &device_hello.available_video_codecs)?;
+        let codec_selection = select_codec_for_startup(
+            &bootstrap.request,
+            &device_hello.available_video_codecs,
+            &host_codec_capability,
+        )?;
+        let selected_codec = codec_selection.selected_codec.clone();
         let session_config = build_session_config(
             &session_id,
             selected_codec.clone(),
@@ -141,17 +185,25 @@ where
 
         let session_ready = match session_runtime.receive_message()? {
             InboundSessionMessage::SessionReady(message) => message,
-            InboundSessionMessage::SessionError(error) => return Err(map_session_error(&error)),
+            InboundSessionMessage::SessionError(error) => {
+                return Err(map_session_error(bootstrap.route, &error))
+            }
             unexpected => {
                 return Err(HostError::ContractViolation(format!(
-                    "expected session_ready after session_config, got {}",
+                    "route `{}` expected session_ready after session_config, got {}",
+                    bootstrap.route,
                     unexpected.message_type()
                 )))
             }
         };
         validate_session_ready(&session_ready, &session_id, &selected_codec)?;
 
-        forward_hdc_endpoint(&self.hdc, &bootstrap.device_id, &video_channel)?;
+        forward_hdc_endpoint(
+            &self.hdc,
+            &bootstrap.device_id,
+            bootstrap.route,
+            &video_channel,
+        )?;
         let video_runtime = self
             .transport
             .open_video_channel(&video_channel, selected_codec.clone())?;
@@ -178,16 +230,38 @@ where
         );
 
         Ok(SessionStartupPlan {
+            route: bootstrap.route,
             response,
             negotiation: SessionNegotiation {
                 device_hello,
                 authorization_updates,
                 session_ready,
             },
+            codec_selection: codec_selection.diagnostics,
             video_path: classify_negotiated_video_path(&selected_codec),
             outbound_session_messages,
             runtime,
         })
+    }
+}
+
+impl SessionOrchestrator<RuntimeHdcBridge, RouteCompanionManager<RuntimeHdcBridge>> {
+    pub fn for_route(route: HostRoute) -> Self {
+        Self::for_route_with_uitest_config(route, UitestLaunchConfig::default())
+    }
+
+    pub fn for_route_with_uitest_config(
+        route: HostRoute,
+        uitest_config: UitestLaunchConfig,
+    ) -> Self {
+        Self::new(
+            RuntimeHdcBridge::new(),
+            RouteCompanionManager::with_uitest_config(
+                route,
+                RuntimeHdcBridge::new(),
+                uitest_config,
+            ),
+        )
     }
 }
 
@@ -220,13 +294,197 @@ fn video_channel_endpoint() -> ChannelEndpoint {
 fn forward_hdc_endpoint<H: HdcBridge>(
     hdc: &H,
     device_id: &str,
+    route: HostRoute,
     endpoint: &ChannelEndpoint,
 ) -> HostResult<()> {
+    if route == HostRoute::Uitest {
+        return Ok(());
+    }
     if endpoint.transport == TransportKind::HdcForward {
         let port = endpoint_port(endpoint)?;
         hdc.forward_port(device_id, port, port)?;
     }
     Ok(())
+}
+
+fn start_uitest_official_stream(
+    device_id: &str,
+    request: &SessionStartRequest,
+    session_channel: &ChannelEndpoint,
+    selected_payload: &str,
+) -> HostResult<SessionStartupPlan> {
+    let local_port = endpoint_port(session_channel)?;
+    let session_id = build_session_id(device_id);
+    let route_supported_codecs = vec![official_h264_descriptor()];
+    let host_codec_capability = host_codec_capability();
+    let codec_selection =
+        select_codec_for_startup(request, &route_supported_codecs, &host_codec_capability)?;
+    if codec_selection.selected_codec != VideoCodec::H264 {
+        return Err(HostError::ContractViolation(format!(
+            "route `uitest` phase `codec-selection` selected unsupported codec {}; official scrcpy stream currently supports h264 only",
+            video_codec_name(&codec_selection.selected_codec)
+        )));
+    }
+
+    let mut start_client = OfficialScrcpyClient::for_forwarded_local_tcp(local_port);
+    let target = start_client.config().target();
+    let stream = start_client.start().map_err(|error| {
+        HostError::TransportFailure(format!(
+            "route `uitest` phase `grpc-start` target `{target}` method `/ScrcpyService/onStart` selected_payload `{selected_payload}` selected_codec=h264: {error}"
+        ))
+    })?;
+
+    let authorization = FeatureAuthorization {
+        video_capture: AuthorizationState::Granted,
+        input_injection: AuthorizationState::Unsupported,
+    };
+    let display = DisplayInfo {
+        width: HOST_MAX_WIDTH,
+        height: HOST_MAX_HEIGHT,
+        rotation: 0,
+    };
+    let channel_layout = ChannelLayout {
+        session: ChannelBinding {
+            name: "official-grpc-control".to_string(),
+            state: "ready".to_string(),
+            payload_type: "grpc_unary".to_string(),
+            activation: "onEnd during host stop".to_string(),
+        },
+        video: ChannelBinding {
+            name: "official-grpc-stream".to_string(),
+            state: "streaming".to_string(),
+            payload_type: "h264_annex_b".to_string(),
+            activation: "ScrcpyService/onStart".to_string(),
+        },
+    };
+    let device_hello = DeviceHello {
+        session_id: session_id.clone(),
+        protocol_major: PROTOCOL_MAJOR_MVP,
+        protocol_minor: PROTOCOL_MINOR_MVP,
+        companion_version: "official-uitest-scrcpy".to_string(),
+        device_name: device_id.to_string(),
+        authorization: authorization.clone(),
+        available_features: vec![SessionFeature::Video],
+        available_video_codecs: route_supported_codecs,
+        display: display.clone(),
+    };
+    let session_ready = SessionReady {
+        session_id: session_id.clone(),
+        selected_video_codec: VideoCodec::H264,
+        channel_layout,
+        display,
+    };
+    let response = SessionStartResponse {
+        session_id: session_id.clone(),
+        selected_codec: VideoCodec::H264,
+        session_channel: session_channel.clone(),
+        video_channel: session_channel.clone(),
+        control: SessionControlState { enabled: false },
+        authorization,
+    };
+    let runtime = SessionRuntime::new(
+        session_id.clone(),
+        VideoCodec::H264,
+        Box::new(OfficialScrcpyControlChannel {
+            local_port,
+            target,
+            selected_payload: selected_payload.to_string(),
+        }),
+        Box::new(OfficialScrcpyVideoChannel {
+            stream,
+            adapter: OfficialScrcpyIngressAdapter::new(0, official_pts_step_us(request)),
+        }),
+    );
+
+    Ok(SessionStartupPlan {
+        route: HostRoute::Uitest,
+        response,
+        negotiation: SessionNegotiation {
+            device_hello,
+            authorization_updates: Vec::new(),
+            session_ready,
+        },
+        codec_selection: codec_selection.diagnostics,
+        video_path: NegotiatedVideoPath::H264Mainline,
+        outbound_session_messages: Vec::new(),
+        runtime,
+    })
+}
+
+struct OfficialScrcpyControlChannel {
+    local_port: u16,
+    target: String,
+    selected_payload: String,
+}
+
+impl super::runtime::SessionChannelTransport for OfficialScrcpyControlChannel {
+    fn send_message(&mut self, message: &SessionMessage) -> HostResult<()> {
+        match message {
+            SessionMessage::StopSession(_) => {
+                let mut client = OfficialScrcpyClient::for_forwarded_local_tcp(self.local_port);
+                client.stop().map(|_| ()).map_err(|error| {
+                    HostError::TransportFailure(format!(
+                        "route `uitest` phase `grpc-stop` target `{}` method `/ScrcpyService/onEnd` selected_payload `{}` selected_codec=h264: {error}",
+                        self.target, self.selected_payload
+                    ))
+                })
+            }
+            unexpected => Err(HostError::ContractViolation(format!(
+                "route `uitest` official control channel only supports stop_session mapped to ScrcpyService/onEnd, got {unexpected:?}"
+            ))),
+        }
+    }
+
+    fn receive_message(&mut self) -> HostResult<InboundSessionMessage> {
+        Err(HostError::ContractViolation(
+            "route `uitest` official control channel does not expose host-device session messages"
+                .to_string(),
+        ))
+    }
+}
+
+struct OfficialScrcpyVideoChannel {
+    stream: crate::official_scrcpy::OfficialScrcpyStream,
+    adapter: OfficialScrcpyIngressAdapter,
+}
+
+impl super::runtime::VideoChannelTransport for OfficialScrcpyVideoChannel {
+    fn receive_video_ingress(&mut self) -> HostResult<PreparedVideoIngress> {
+        let message = self.stream.next().ok_or_else(|| {
+            HostError::TransportFailure(
+                "route `uitest` phase `grpc-stream` official ScrcpyService/onStart stream ended before host stop"
+                    .to_string(),
+            )
+        })??;
+        self.adapter.ingest_message(message)
+    }
+}
+
+fn official_h264_descriptor() -> VideoCodecDescriptor {
+    VideoCodecDescriptor {
+        codec: VideoCodec::H264,
+        encoder_kind: "official-uitest-platform-avc".to_string(),
+        max_width: HOST_MAX_WIDTH,
+        max_height: HOST_MAX_HEIGHT,
+        max_fps: 60,
+        bitrate_control: Some("official".to_string()),
+    }
+}
+
+fn official_pts_step_us(request: &SessionStartRequest) -> u64 {
+    if request.preferred_max_fps == 0 {
+        0
+    } else {
+        1_000_000 / u64::from(request.preferred_max_fps)
+    }
+}
+
+fn video_codec_name(codec: &VideoCodec) -> &'static str {
+    match codec {
+        VideoCodec::H264 => "h264",
+        VideoCodec::Jpeg => "jpeg",
+        VideoCodec::H265Experimental => "h265",
+    }
 }
 
 fn build_host_hello(
@@ -327,6 +585,7 @@ fn validate_session_ready(
 fn wait_for_authorization(
     session_runtime: &mut dyn super::runtime::SessionChannelTransport,
     session_id: &str,
+    route: HostRoute,
     control_enabled: bool,
     initial_authorization: FeatureAuthorization,
 ) -> HostResult<(FeatureAuthorization, Vec<AuthorizationUpdate>)> {
@@ -346,7 +605,9 @@ fn wait_for_authorization(
                 authorization = update.authorization.clone();
                 updates.push(update);
             }
-            InboundSessionMessage::SessionError(error) => return Err(map_session_error(&error)),
+            InboundSessionMessage::SessionError(error) => {
+                return Err(map_session_error(route, &error))
+            }
             unexpected => {
                 return Err(HostError::ContractViolation(format!(
                     "expected authorization_update while waiting for grants, got {}",
@@ -373,57 +634,49 @@ fn resolve_control_mode(
 }
 
 fn host_supported_video_codecs() -> Vec<VideoCodec> {
-    vec![VideoCodec::H264, VideoCodec::Jpeg]
+    host_codec_capability()
+        .supported_codecs
+        .into_iter()
+        .filter_map(|codec| codec.to_video_codec())
+        .collect()
 }
 
-fn normalize_requested_codec_order(requested_order: &[VideoCodec]) -> HostResult<Vec<VideoCodec>> {
-    let request_is_empty = requested_order.is_empty();
-    let h264_requested = request_is_empty || requested_order.contains(&VideoCodec::H264);
-    let jpeg_requested = request_is_empty || requested_order.contains(&VideoCodec::Jpeg);
-    let mut normalized = Vec::new();
+fn host_codec_capability() -> HostCodecCapability {
+    HostCodecCapability::mvp_h264_jpeg()
+}
 
-    if h264_requested {
-        normalized.push(VideoCodec::H264);
-    }
-    if jpeg_requested || h264_requested {
-        normalized.push(VideoCodec::Jpeg);
-    }
+fn normalize_requested_codec_order_for_host_hello(
+    requested_order: &[VideoCodec],
+    host_capability: &HostCodecCapability,
+) -> HostResult<Vec<VideoCodec>> {
+    let normalized = normalized_requested_codec_order(requested_order);
+    let host_supported: Vec<VideoCodec> = host_capability
+        .supported_codecs
+        .iter()
+        .filter_map(|codec| codec.to_video_codec())
+        .collect();
+    let preferred: Vec<VideoCodec> = normalized
+        .into_iter()
+        .filter(|codec| host_supported.contains(codec))
+        .collect();
 
-    if normalized.is_empty() {
+    if preferred.is_empty() {
         return Err(HostError::ContractViolation(
             "no host-supported codec in request; expected h264 and/or jpeg".to_string(),
         ));
     }
 
-    Ok(normalized)
+    Ok(preferred)
 }
 
-fn select_codec(
-    requested_order: &[VideoCodec],
-    available_codecs: &[hscrcpy_contracts::VideoCodecDescriptor],
-) -> HostResult<VideoCodec> {
-    for codec in requested_order {
-        if available_codecs
-            .iter()
-            .any(|descriptor| &descriptor.codec == codec)
-        {
-            return Ok(codec.clone());
-        }
-    }
-    Err(HostError::ContractViolation(
-        "no_shared_video_codec: no compatible codec between host preference and device_hello"
-            .to_string(),
-    ))
-}
-
-fn map_session_error(error: &hscrcpy_contracts::SessionError) -> HostError {
-    HostError::ContractViolation(format!("{}: {}", error.code, error.message))
+fn map_session_error(route: HostRoute, error: &hscrcpy_contracts::SessionError) -> HostError {
+    HostError::ContractViolation(format!("route `{route}` {}: {}", error.code, error.message))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        build_session_id, normalize_requested_codec_order, resolve_control_mode, select_codec,
+        build_session_id, normalize_requested_codec_order_for_host_hello, resolve_control_mode,
         SessionBootstrap, SessionOrchestrator,
     };
     use crate::companion::{
@@ -431,6 +684,7 @@ mod tests {
     };
     use crate::control::{ControlMessageEmitter, OutboundControlEvent, SessionMessageSink};
     use crate::hdc::HdcBridge;
+    use crate::route::HostRoute;
     use crate::session::{SessionChannelTransport, SessionTransportFactory, VideoChannelTransport};
     use crate::video::{PreparedVideoIngress, VideoTransportPacket};
     use crate::{HostError, HostResult};
@@ -471,9 +725,27 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
     struct TestCompanionManager {
-        launched_sessions: Rc<RefCell<Vec<String>>>,
+        launched_sessions: Rc<RefCell<Vec<CompanionLaunchRequest>>>,
+        artifact_hint: String,
+    }
+
+    impl Default for TestCompanionManager {
+        fn default() -> Self {
+            Self {
+                launched_sessions: Rc::new(RefCell::new(Vec::new())),
+                artifact_hint: "assets/companion/hscrcpy_server.hap".to_string(),
+            }
+        }
+    }
+
+    impl TestCompanionManager {
+        fn with_artifact_hint(artifact_hint: impl Into<String>) -> Self {
+            Self {
+                artifact_hint: artifact_hint.into(),
+                ..Self::default()
+            }
+        }
     }
 
     impl CompanionManager for TestCompanionManager {
@@ -481,7 +753,7 @@ mod tests {
             Ok(CompanionPlan {
                 action: CompanionAction::Skip,
                 target_version: "1.0.0".to_string(),
-                artifact_hint: "assets/companion/hscrcpy_server.hap".to_string(),
+                artifact_hint: self.artifact_hint.clone(),
             })
         }
 
@@ -494,9 +766,7 @@ mod tests {
             _device_id: &str,
             request: &CompanionLaunchRequest,
         ) -> HostResult<()> {
-            self.launched_sessions
-                .borrow_mut()
-                .push(request.session_id.clone());
+            self.launched_sessions.borrow_mut().push(request.clone());
             Ok(())
         }
     }
@@ -524,10 +794,12 @@ mod tests {
     }
 
     impl VideoChannelTransport for TestVideoChannel {
-        fn receive_packet(&mut self) -> HostResult<VideoTransportPacket> {
-            self.packets
+        fn receive_video_ingress(&mut self) -> HostResult<PreparedVideoIngress> {
+            let packet = self
+                .packets
                 .pop_front()
-                .expect("unexpected video receive in test")
+                .expect("unexpected video receive in test")?;
+            PreparedVideoIngress::from_packet(packet)
         }
     }
 
@@ -570,48 +842,10 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_h264_mainline_with_explicit_jpeg_fallback() {
-        let normalized = normalize_requested_codec_order(&[VideoCodec::H264])
-            .expect("h264 request should include explicit jpeg fallback");
-        assert_eq!(normalized, vec![VideoCodec::H264, VideoCodec::Jpeg]);
-    }
-
-    #[test]
-    fn keeps_jpeg_only_mode_when_h264_is_not_requested() {
-        let normalized = normalize_requested_codec_order(&[VideoCodec::Jpeg])
-            .expect("jpeg-only mode should remain valid");
-        assert_eq!(normalized, vec![VideoCodec::Jpeg]);
-    }
-
-    #[test]
-    fn rejects_requests_without_host_supported_codecs() {
-        let err = normalize_requested_codec_order(&[VideoCodec::H265Experimental])
-            .expect_err("h265-only request is not supported in MVP host");
-        assert!(err.to_string().contains("no host-supported codec"));
-    }
-
-    #[test]
     fn rejects_control_request_when_device_cannot_inject_input() {
         let err = resolve_control_mode(true, &[SessionFeature::Video])
             .expect_err("control support mismatch must fail");
         assert!(err.to_string().contains("feature_unsupported"));
-    }
-
-    #[test]
-    fn selects_jpeg_when_h264_is_missing() {
-        let selected = select_codec(
-            &[VideoCodec::H264, VideoCodec::Jpeg],
-            &[VideoCodecDescriptor {
-                codec: VideoCodec::Jpeg,
-                encoder_kind: "software".to_string(),
-                max_width: 1920,
-                max_height: 1080,
-                max_fps: 30,
-                bitrate_control: None,
-            }],
-        )
-        .expect("jpeg fallback should be selected");
-        assert_eq!(selected, VideoCodec::Jpeg);
     }
 
     #[test]
@@ -696,6 +930,7 @@ mod tests {
         let bootstrap = SessionBootstrap::new(
             "usb-device-001",
             SessionStartRequest::h264_mainline(60, true),
+            HostRoute::HscrcpyServer,
         );
 
         let mut plan = orchestrator
@@ -703,6 +938,19 @@ mod tests {
             .expect("startup plan should succeed");
 
         assert_eq!(plan.response.selected_codec, VideoCodec::Jpeg);
+        assert_eq!(
+            plan.codec_selection
+                .selected_codec
+                .as_ref()
+                .map(|codec| codec.as_str()),
+            Some("jpeg")
+        );
+        assert!(plan
+            .codec_selection
+            .fallback_reason
+            .as_deref()
+            .expect("jpeg selection should include fallback reason")
+            .contains("unsupported by route/device encoder"));
         assert_eq!(plan.negotiation.authorization_updates.len(), 1);
         assert_eq!(
             plan.video_path,
@@ -822,9 +1070,11 @@ mod tests {
             .start(&SessionBootstrap::new(
                 "usb-device-001",
                 SessionStartRequest::h264_mainline(60, false),
+                HostRoute::HscrcpyServer,
             ))
             .expect("startup should succeed before ingest validation");
         assert_eq!(plan.response.selected_codec, VideoCodec::H264);
+        assert!(plan.codec_selection.fallback_reason.is_none());
 
         let err = plan
             .runtime
@@ -834,6 +1084,59 @@ mod tests {
         assert!(
             err.to_string().contains("Annex-B"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn uitest_startup_rejects_unsupported_codec_without_hap_fallback() {
+        let forwarded_ports = Rc::new(RefCell::new(Vec::new()));
+        let companion = TestCompanionManager::with_artifact_hint(
+            "third_party/hypium/hosScrcpy/6.1.0.210/libscrcpy/libscrcpy_server_unix_6.5-20260313.z.so",
+        );
+        let launched_sessions = companion.launched_sessions.clone();
+        let sent_messages = Rc::new(RefCell::new(Vec::new()));
+        let opened_video_codecs = Rc::new(RefCell::new(Vec::new()));
+        let orchestrator = SessionOrchestrator::with_transport(
+            TestHdcBridge {
+                forwarded_ports: forwarded_ports.clone(),
+            },
+            companion,
+            TestTransportFactory {
+                session_messages: Rc::new(RefCell::new(Some(VecDeque::new()))),
+                video_packets: Rc::new(RefCell::new(Some(VecDeque::new()))),
+                sent_messages: sent_messages.clone(),
+                opened_video_codecs: opened_video_codecs.clone(),
+            },
+        );
+
+        let err = match orchestrator.start(&SessionBootstrap::new(
+            "usb-device-001",
+            SessionStartRequest::jpeg_baseline(60, false),
+            HostRoute::Uitest,
+        )) {
+            Ok(_) => panic!("uitest route should reject unsupported jpeg request"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err, HostError::ContractViolation(_)));
+        let message = err.to_string();
+        assert!(
+            message.contains("no_shared_video_codec"),
+            "unexpected error: {message}"
+        );
+        assert_eq!(launched_sessions.borrow().len(), 1);
+        assert_eq!(launched_sessions.borrow()[0].route, HostRoute::Uitest);
+        assert!(
+            forwarded_ports.borrow().is_empty(),
+            "uitest startup must not forward HAP session/video ports"
+        );
+        assert!(
+            sent_messages.borrow().is_empty(),
+            "uitest startup must not enter HAP JSON handshake"
+        );
+        assert!(
+            opened_video_codecs.borrow().is_empty(),
+            "uitest startup must not open HAP video channel"
         );
     }
 
@@ -893,11 +1196,57 @@ mod tests {
         let err = match orchestrator.start(&SessionBootstrap::new(
             "usb-device-001",
             SessionStartRequest::h264_mainline(60, false),
+            HostRoute::HscrcpyServer,
         )) {
             Ok(_) => panic!("session_error should fail startup"),
             Err(err) => err,
         };
         assert!(matches!(err, HostError::ContractViolation(_)));
         assert!(err.to_string().contains("protocol_major_mismatch"));
+    }
+
+    #[test]
+    fn rejects_h265_only_request_before_host_hello_is_sent() {
+        let sent_messages = Rc::new(RefCell::new(Vec::new()));
+        let orchestrator = SessionOrchestrator::with_transport(
+            TestHdcBridge {
+                forwarded_ports: Rc::new(RefCell::new(Vec::new())),
+            },
+            TestCompanionManager::default(),
+            TestTransportFactory {
+                session_messages: Rc::new(RefCell::new(Some(VecDeque::new()))),
+                video_packets: Rc::new(RefCell::new(Some(VecDeque::new()))),
+                sent_messages: sent_messages.clone(),
+                opened_video_codecs: Rc::new(RefCell::new(Vec::new())),
+            },
+        );
+
+        let err = match orchestrator.start(&SessionBootstrap::new(
+            "usb-device-001",
+            SessionStartRequest {
+                requested_codec_order: vec![VideoCodec::H265Experimental],
+                preferred_max_fps: 60,
+                enable_control: false,
+            },
+            HostRoute::HscrcpyServer,
+        )) {
+            Ok(_) => panic!("h265-only request should fail before negotiation"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("no host-supported codec"));
+        assert!(
+            sent_messages.borrow().is_empty(),
+            "host_hello must not be sent for unsupported requests"
+        );
+    }
+
+    #[test]
+    fn host_hello_preferred_codecs_are_subset_of_supported_codecs() {
+        let preferred = normalize_requested_codec_order_for_host_hello(
+            &[VideoCodec::H265Experimental, VideoCodec::H264],
+            &super::host_codec_capability(),
+        )
+        .expect("mixed request should keep host-supported codecs");
+        assert_eq!(preferred, vec![VideoCodec::H264, VideoCodec::Jpeg]);
     }
 }

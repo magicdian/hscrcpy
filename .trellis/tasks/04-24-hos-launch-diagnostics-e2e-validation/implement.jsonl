@@ -1,0 +1,12 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Final diagnostics must report route, phase, target, selected payload/codec, and device output."}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Route-aware diagnostics and render timing summaries must stay structured and non-spammy."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Final validation must include tests and avoid claiming unsupported e2e paths."}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Final contract docs must reflect implemented route abstraction, deferred real gRPC, and validation matrix."}
+{"file": "docs/harmony-hos-scrcpy-debug-guide.md", "reason": "Manual validation commands for official uitest route, sockets, logs, and payloads belong here."}
+{"file": "crates/hscrcpy-host/src/uitest.rs", "reason": "Lifecycle phase errors and cleanup behavior need final diagnostics validation."}
+{"file": "crates/hscrcpy-host/src/official_scrcpy.rs", "reason": "Adapter currently has deferred real gRPC transport and mockable stream conversion; diagnostics must expose this blocker."}
+{"file": "crates/hscrcpy-host/src/video/mod.rs", "reason": "Official H.264 ingress adapter and route-neutral renderer handoff need final validation coverage."}
+{"file": "crates/hscrcpy-host/src/session/startup.rs", "reason": "Startup must fail selected route explicitly and not auto-fallback."}
+{"file": "apps/hscrcpy-host-cli/src/main.rs", "reason": "CLI diagnostics and manual commands should reflect route selection and current blocker honestly."}

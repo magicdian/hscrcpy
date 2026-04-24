@@ -29,7 +29,11 @@ This document is the current source of truth for the HarmonyOS scrcpy-like MVP b
 * MVP uses two logical channels:
   * `session` for handshake and control
   * `video` for media payloads
-* `H.264` is the preferred video path, `JPEG` is the required fallback, and `H.265` is reserved as experimental.
+* Codec selection is negotiated from both sides' runtime capability:
+  * device/route encoder support
+  * host decoder/render support
+  * user codec preference
+* The startup contract must use an extensible codec capability registry rather than a closed enum. `H.264` is the required first playback target; H.265, H.266/VVC, VP9, AV1, JPEG, and other codecs are future probeable capabilities when route and host support exist.
 * ArkTS stays responsible for lifecycle, permissions, and user-facing authorization prompts. Native code owns capture, encode, transport, and control handling.
 * Protocol compatibility is governed by `protocol_major` and `protocol_minor`.
 
@@ -47,9 +51,11 @@ This document is the current source of truth for the HarmonyOS scrcpy-like MVP b
 * detect the target device over HDC
 * compare installed companion metadata against the bundled manifest
 * install or upgrade the companion when needed
-* launch the companion into session mode
+* select the launch route, such as the installed HAP companion or the official `uitest` scrcpy route
+* probe host decoder/render support before selecting a codec
+* launch the selected route into session/stream mode
 * open the `session` channel first
-* negotiate features and select the video path
+* negotiate features and select the video codec from route/device encoder support plus host decoder support
 * open and monitor the `video` channel after negotiation succeeds
 * surface authorization and compatibility failures clearly
 
@@ -59,6 +65,7 @@ This document is the current source of truth for the HarmonyOS scrcpy-like MVP b
 * hand off runtime work to a native core
 * report authorization state instead of guessing host intent
 * advertise capture, codec, and control capabilities at runtime
+* expose route-specific encoder capabilities without forcing the host to know route internals
 * start video only after session configuration is accepted
 * keep control handling off the video path
 
@@ -98,12 +105,21 @@ These are the current concrete command/API shapes used by the Rust host runtime:
 | launch companion shell | `hdc -t <resolved-target> shell aa start -b <bundle> -a <ability>` | `crates/hscrcpy-host/src/companion/mod.rs` |
 | forward `session` channel | `hdc -t <resolved-target> fport tcp:27182 tcp:27182` | `crates/hscrcpy-host/src/session/startup.rs` |
 | forward `video` channel | `hdc -t <resolved-target> fport tcp:27183 tcp:27183` | `crates/hscrcpy-host/src/session/startup.rs` |
+| push official `uitest` scrcpy payload | `hdc -t <resolved-target> file send <selected-libscrcpy-server.so> /data/local/tmp/scrcpy_server.so` | `crates/hscrcpy-host/src/uitest.rs` |
+| kill stale official `uitest` scrcpy processes | `hdc -t <resolved-target> shell kill -9 <xdevice_scrcpy-or-uitest-pid>` | `crates/hscrcpy-host/src/uitest.rs` |
+| launch official `uitest` scrcpy server | `hdc -t <resolved-target> shell uitest start-daemon singleness --extension-name scrcpy_server.so ...` | `crates/hscrcpy-host/src/uitest.rs` |
+| forward official `uitest` scrcpy socket | `hdc -t <resolved-target> fport tcp:27182 localabstract:scrcpy_grpc_socket` | `crates/hscrcpy-host/src/uitest.rs` |
+| remove temporary official `uitest` payload | `hdc -t <resolved-target> shell rm -f /data/local/tmp/scrcpy_server.so` | `crates/hscrcpy-host/src/uitest.rs` |
 
 Rules:
 
 * `--device auto` is a host-side convenience only. The host must resolve it once to a concrete serial before issuing `hdc -t ...` commands.
 * The host currently launches `EntryAbility` first, and the device-side `EntryAbility.onCreate()` is responsible for bootstrapping native session listener startup.
 * Companion install/update decisions are based on the top-level `versionCode` / `versionName` fields from `bm dump`, not nested quick-fix or module fields.
+* Route selection must be explicit in host diagnostics. The HAP route and the official `uitest` route must both feed a route-neutral video ingress layer.
+* The selected route must fail fast. If `--route uitest` fails during payload selection, stale process cleanup, payload push, daemon launch, socket forwarding, gRPC connect/start/status, first-frame ingestion, renderer handoff, or shutdown, the host must not automatically launch the `hscrcpy-server` HAP route.
+* The current `uitest` route uses a standard host-side `tonic` + `prost` generated gRPC client for official `ScrcpyService/onStart`, `onEnd`, and `onRequestIDRFrame`. Protocol-specific generated types stay inside `crates/hscrcpy-host/src/official_scrcpy.rs`; the stream is normalized through `OfficialScrcpyIngressAdapter` into route-neutral H.264 ingress before reaching the bringup renderer / ffplay path.
+* The repo-local schema lives at `crates/hscrcpy-host/proto/scrcpy.proto`. It was reconstructed from the generated descriptor embedded in `xdevice_devicetest-6.1.0.210-py3-none-any.whl/devicetest/controllers/tools/recorder/proto/scrcpy_pb2.py`; it is not a public Huawei `.proto` source file and was not recovered by reverse engineering the device-side `.so`.
 
 ### 4.2 Session Channel Messages
 
@@ -167,7 +183,7 @@ The current host/device runtime now shares a concrete binary header:
 
 | Offset | Size | Field | Encoding |
 |---|---:|---|---|
-| `0` | `1` | `codec` | `1=h264`, `2=jpeg`, `3=h265` |
+| `0` | `1` | `codec` | codec registry tag; current tags are `1=h264`, `2=jpeg`, `3=h265` |
 | `1` | `8` | `pts_us` | big-endian unsigned integer |
 | `9` | `1` | `is_keyframe` | `0` or `1` |
 | `10` | `4` | `payload_length` | big-endian unsigned integer |
@@ -179,6 +195,7 @@ Rules:
 * `payload_length` must be positive and must match the number of bytes following the header.
 * For `codec=h264`, payload bytes must be one Annex-B access unit (3-byte or 4-byte start-code delimiters) with at least one valid NAL unit.
 * For `codec=h264` packets marked `is_keyframe=1`, the access unit must include an IDR NAL (`nal_unit_type=5`) so host-side keyframe assumptions stay aligned with decoder expectations.
+* Future codec tags such as H.266/VVC, VP9, and AV1 must be added through the shared codec registry before either route emits packets for them.
 
 ## 5. Contracts
 
@@ -254,7 +271,7 @@ The startup sequence is:
 | `protocol_minor` | integer | yes | Minor capability marker. |
 | `host_version` | string | yes | Host build version. |
 | `requested_features` | string[] | yes | MVP values: `video`, `control`. |
-| `supported_video_codecs` | string[] | yes | Subset of `h264`, `jpeg`, `h265`. |
+| `supported_video_codecs` | string[] | yes | Codec names supported by the host decoder/render path. Current required value is `h264`; future examples include `h265`, `h266`, `vp9`, `av1`, and `jpeg`. |
 | `preferred_video_codecs` | string[] | yes | Ordered preference list. |
 | `video_limits.max_width` | integer | yes | Host render/decode ceiling. |
 | `video_limits.max_height` | integer | yes | Host render/decode ceiling. |
@@ -293,12 +310,12 @@ The startup sequence is:
 |---|---|---:|---|
 | `type` | string | yes | Must be `session_config`. |
 | `session_id` | string | yes | Session being configured. |
-| `selected_video_codec` | string | yes | `h264`, `jpeg`, or later `h265`. |
+| `selected_video_codec` | string | yes | Selected codec name from the shared registry. Current required implementation target is `h264`. |
 | `video.max_width` | integer | yes | Host-selected width cap. |
 | `video.max_height` | integer | yes | Host-selected height cap. |
 | `video.max_fps` | integer | yes | Host-selected FPS cap. |
 | `video.bitrate_kbps` | integer | no | Used only for bitrate-driven codecs. |
-| `video.iframe_interval_ms` | integer | no | Mainly relevant for `h264`/`h265`. |
+| `video.iframe_interval_ms` | integer | no | Mainly relevant for inter-frame video codecs such as H.264/H.265 and future codecs with keyframe control. |
 | `control.enabled` | boolean | yes | Whether control messages will be sent. |
 | `rotation.locked` | boolean | no | Reserved for later display policy. |
 
@@ -368,26 +385,46 @@ Rules:
 
 ### 5.4 Capability Negotiation Contract
 
-Codec negotiation is host-driven after the device advertises actual runtime capabilities.
+Codec negotiation is host-driven after the selected route advertises or infers actual encoder capabilities and the host probes decoder/render capabilities. The codec set must be extensible; current implementation can require only H.264 end-to-end while still preserving future capability entries.
 
 Stable selection rules:
 
 * `preferred_video_codecs` from `host_hello` is ordered by host preference.
 * `available_video_codecs` from `device_hello` is the device source of truth.
-* Host chooses the first codec that is supported by both sides and permitted by the session request.
-* If `h264` is unavailable or unusable, host falls back to `jpeg`.
-* `h265` must not displace `h264` in MVP unless explicitly requested by a future experimental mode.
+* `host_available_decoders` or an equivalent host-side capability set is the host source of truth.
+* Host chooses the first codec that is supported by device/route encoding, host decoding, and the session request.
+* Current route bringup should select H.264 unless explicitly testing another verified codec.
+* Future codecs such as H.265, H.266/VVC, VP9, AV1, and JPEG may be selected only after both route/device encoder support and host decoder support are verified.
+* If the preferred codec is unavailable or not allowed, host should fall back to the next mutually supported codec.
+* The selected codec and fallback reason must be visible in host diagnostics before stream start.
 
 Each `available_video_codecs` entry must provide:
 
 | Field | Type | Required | Notes |
 |---|---|---:|---|
-| `codec` | string | yes | `h264`, `jpeg`, or `h265`. |
+| `codec` | string | yes | Codec registry name. Current required implementation target is `h264`; future examples include `h265`, `h266`, `vp9`, `av1`, and `jpeg`. |
 | `encoder_kind` | string | yes | `hardware` or `software`. |
 | `max_width` | integer | yes | Device codec ceiling. |
 | `max_height` | integer | yes | Device codec ceiling. |
 | `max_fps` | integer | yes | Device codec ceiling. |
 | `bitrate_control` | string | no | Optional hint such as `cbr` or `vbr`. |
+
+Each host decoder capability entry should provide:
+
+| Field | Type | Required | Notes |
+|---|---|---:|---|
+| `codec` | string | yes | Codec registry name. Current required implementation target is `h264`; future examples include `h265`, `h266`, `vp9`, `av1`, and `jpeg`. |
+| `decoder_kind` | string | yes | `hardware`, `software`, `external`, or `unknown`. |
+| `max_width` | integer | no | Host decode/render ceiling when known. |
+| `max_height` | integer | no | Host decode/render ceiling when known. |
+| `max_fps` | integer | no | Host decode/render ceiling when known. |
+
+Route rules:
+
+* HAP route may obtain device encoder capability from the device `device_hello`.
+* Official `uitest` route may infer device encoder capability from selected official payload, launch parameters, and verified stream behavior until the route exposes a richer capability API.
+* The final codec decision must use the same selection function for both routes.
+* Adding a new codec must not require redesigning route startup; it should add registry metadata, route capability mapping, host decoder probing, tests, and renderer handling.
 
 ### 5.5 Channel Split Contract
 
@@ -412,6 +449,10 @@ Rules:
 |---|---|---|---|
 | Host and device `protocol_major` differ | host or device during hello | Abort immediately | `protocol_major_mismatch` |
 | No shared video codec exists | host after `device_hello` | Abort before `session_config` | `no_shared_video_codec` |
+| Host decoder does not support the device's preferred codec | host before stream start | Select the next mutually supported codec | `codec_fallback` |
+| Selected route cannot provide the selected codec | host before stream start | Select next codec or abort if none remains | `route_codec_unavailable` |
+| Stale `xdevice_scrcpy` process exists before launch | host before `uitest` launch | Try to kill it; fail if kill is denied or process remains alive | `stale_route_process` |
+| Temporary scrcpy server `.so` remains after failed launch | host cleanup after failed launch | Try to remove it; fail if cleanup fails | `route_payload_cleanup_failed` |
 | A requested feature is `unsupported` | device during hello/update | Abort or drop feature and restart explicitly | `feature_unsupported` |
 | A required feature is `denied` | device during hello/update | Abort current session | `authorization_denied` |
 | Authorization still pending | device during hello/update | Wait for user action; do not start video | `authorization_pending` |
@@ -422,6 +463,11 @@ Rules:
 | Device rejects selected config | device on `session_config` | Return `session_error` | `session_config_rejected` |
 | Video channel does not come up after `session_ready` | host after ready | Stop session and report failure | `video_channel_timeout` |
 | Host opens `video` but device never writes a complete header | host after ready | Abort current capture and inspect device video runtime/logs | `video_packet_header_eof` |
+| Official `uitest` payload selection fails | host before `uitest` lifecycle | Abort selected route before any HDC mutation | `route_payload_selection_failed` |
+| Official `uitest` payload push, stale kill, daemon launch, cleanup, or fport fails | host during `uitest` lifecycle | Abort selected route, include route, phase, target, and HDC output | `route_lifecycle_failed` |
+| Official `uitest` gRPC connect/start/status fails | host after lifecycle/fport | Abort selected route with route, phase, target, method, payload, codec, and transport/status context; do not fall back to HAP route | `route_grpc_transport_failed` |
+| Official first H.264 frame is not Annex-B or is empty | host before renderer handoff | Abort frame ingestion with H.264/Annex-B context | `route_frame_ingress_invalid` |
+| Official `uitest` shutdown is requested through adapter | host during teardown | Call `ScrcpyService/onEnd`; surface result/failure | `route_shutdown_failed` |
 
 ## 7. Good / Base / Bad Cases
 
@@ -455,23 +501,39 @@ Rules:
 
 * Host-side unit tests for install/update decision states: `missing`, `ready`, `upgrade_required`, `protocol_incompatible`, `companion_too_new`.
 * Host-side unit tests that `--device auto` resolves once to a concrete visible target and is reused by later `shell`/`fport` calls.
-* Host-side unit tests for codec selection order: `h264` preferred over `jpeg`, `jpeg` selected when `h264` absent, no silent `h265` promotion in MVP.
+* Host-side unit tests for codec selection:
+  * `h264` selected for the current supported implementation path when route/device encoder and host decoder support it
+  * future codec names such as `h265`, `h266`, `vp9`, `av1`, and `jpeg` can be represented without changing the selection data model
+  * fallback selects the next mutually supported codec when a preferred codec is unavailable
+  * no codec selected when host decode and route/device encode sets do not intersect
 * Protocol parse/serialize tests for every `session` message type.
 * Device-side tests that `session_config` is rejected when required authorization is not `granted`.
 * Integration tests that `session_ready` is emitted before `video` activation and never after a prior `session_error`.
 * Logging assertions for fallback and protocol mismatch paths so failures carry `subsystem`, `operation`, and `session_id`.
 * Device-side bootstrap validation that `EntryAbility.onCreate()` logs `state=listening port=27182 bound=true` after install/run.
-* Manual bringup checks:
-  * `cargo run -p hscrcpy-host-cli -- --device auto --codec jpeg --max-frames 30 --output-dir /tmp/hscrcpy-preview`
-  * `cargo run -p hscrcpy-host-cli -- --device auto --codec h264 --max-frames 30 --output-dir /tmp/hscrcpy-preview`
+* Manual bringup checks for the HAP route:
+  * `cargo run -p hscrcpy-host-cli -- --device auto --route hscrcpy-server --codec jpeg --max-frames 30 --output-dir /tmp/hscrcpy-preview --no-live-preview`
+  * `cargo run -p hscrcpy-host-cli -- --device auto --route hscrcpy-server --codec h264 --max-frames 30 --output-dir /tmp/hscrcpy-preview`
   * assert JPEG artifacts (`preview.html`, `latest.jpg`, `frames/*.jpg`) and H.264 artifacts (`frames/*.h264`, `stream.h264` where applicable) are produced
+* Manual lifecycle and stream check for the official `uitest` route:
+  * `cargo run -p hscrcpy-host-cli -- --device auto --route uitest --codec h264 --uitest-payload third_party/hypium/hosScrcpy/6.1.0.210/libscrcpy/libscrcpy_server_unix_6.5-20260313.z.so --max-frames 30 --output-dir /tmp/hscrcpy-uitest-preview --ffplay-bin /opt/homebrew/bin/ffplay`
+  * expected success: lifecycle diagnostics run through stale process scan, payload push, `uitest start-daemon`, `scrcpy_grpc_socket` forwarding, and payload cleanup; `ScrcpyService/onStart` returns H.264 access units; ffplay displays real device frames; `ScrcpyService/onEnd` is called when `--max-frames` is reached
+  * expected failure shape: errors name `route=uitest`, a concrete phase such as `grpc-connect`, `grpc-start`, `grpc-status`, `grpc-stream`, frame ingress, or render, plus target `127.0.0.1:27182`, method, selected payload, selected codec, and the underlying transport/protocol context
+* Device-side inspection during manual checks:
+  * `DEVICE="$(hdc list targets | awk 'NR==1{print $1}')"`
+  * `hdc -t "$DEVICE" shell 'ps -ef | grep -E "[x]device_scrcpy|[u]itest start-daemon|[h]scrcpy"'`
+  * `hdc -t "$DEVICE" shell 'cat /proc/net/unix | grep -E "scrcpy_grpc_socket|screen_record_grpc_socket|uitest_socket"'`
+  * `hdc fport ls`
+  * `hdc -t "$DEVICE" shell 'hilog -x | grep -E "xdevice_scrcpy|scrcpy_grpc_socket|screen_record|uitest|hypium|UiTestKit_Addon|CreateVirtualScreen|video/avc|hscrcpyDiag"'`
 
 ## 9. Wrong vs Correct
 
 ### Wrong
 
 * Host and device both independently decide the fallback codec in opaque local logic.
+* Route-specific code hard-codes `h264` while host-side decoder probing says only `jpeg` is available.
 * Device starts streaming on the first available codec before receiving `session_config`.
+* Host leaves `/data/local/tmp/scrcpy_server.so` behind after a failed `uitest` launch.
 * Control messages are multiplexed into the hot video path because it looks simpler during bring-up.
 * Host treats `auto` like a real HDC serial and issues `hdc -t auto ...`.
 * Device tries to open TCP listeners without declaring `ohos.permission.INTERNET`.
@@ -480,6 +542,9 @@ Rules:
 
 * Device reports runtime capabilities in `device_hello`.
 * Host performs the final codec selection and sends it back in `session_config`.
+* Host codec selection combines route/device encoder capability with host decoder capability before stream start.
+* Host removes temporary `uitest` payload files after launch success or failure.
+* Host attempts to kill stale route-owned device processes before launch and fails clearly if shell permission is insufficient.
 * Device starts streaming only after `session_ready`.
 * `session` remains the single home for control events and handshake traffic.
 * Host resolves `auto` to a concrete visible target before all later HDC commands.

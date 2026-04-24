@@ -1,0 +1,15 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "UITest lifecycle code should live in host route/HDC modules, not device-side sources."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "HDC forwarding, payload push, process kill, launch, and cleanup failures need phase-rich errors."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Lifecycle behavior must include mockable unit coverage and preserve route isolation."}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Route startup diagnostics should include route, phase, target, command output, and cleanup status without payload spam."}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "HDC command constants, socket names, and payload paths must be centralized for later adapters."}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Contract defines official uitest route forwarding, stale process, cleanup, and route failure semantics."}
+{"file": "docs/harmony-hos-scrcpy-debug-guide.md", "reason": "Official hosScrcpy/uitest artifacts, launch commands, socket names, and process fingerprints are documented here."}
+{"file": "third_party/hypium/README.md", "reason": "Payload archive layout and preferred official scrcpy server artifact families."}
+{"file": "crates/hscrcpy-host/src/hdc/mod.rs", "reason": "Existing HDC bridge currently supports TCP port forwarding and shell commands; extend for localabstract and file push."}
+{"file": "crates/hscrcpy-host/src/companion/mod.rs", "reason": "RouteCompanionManager currently returns not implemented for uitest; wire payload lifecycle here or behind a route module."}
+{"file": "crates/hscrcpy-host/src/route.rs", "reason": "Route enum and CLI values added by task 1 must remain stable."}
+{"file": "crates/hscrcpy-host/src/session/startup.rs", "reason": "Startup route flow invokes CompanionManager; later gRPC adapter should consume forwarded endpoint from lifecycle state."}
+{"file": "apps/hscrcpy-host-cli/src/main.rs", "reason": "CLI may need payload override option while keeping renderer route-neutral."}

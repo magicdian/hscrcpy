@@ -83,6 +83,83 @@ The current device runtime now uses concrete native module slices under `entry/s
   * `uitest_extension_poc.cpp` is an experiment-only entry point for `UiTestExtension_OnInit/OnRun`.
   * Treat this directory as disposable bringup code until the extension loading path is proven viable on real devices.
 
+### Current Rust Host Runtime Layout
+
+The Rust host workspace keeps route-specific protocols behind host adapter modules:
+
+* `crates/hscrcpy-host/src/route.rs` owns route names and CLI-facing parsing.
+* `crates/hscrcpy-host/src/uitest.rs` owns official `uitest` payload lifecycle, HDC push, stale process cleanup, daemon launch, abstract-socket forwarding, and payload cleanup.
+* `crates/hscrcpy-host/src/official_scrcpy.rs` owns generated official scrcpy gRPC/protobuf types and converts them into route-neutral host messages.
+* `crates/hscrcpy-host/proto/scrcpy.proto` is the repo-local schema reconstructed from the generated descriptor embedded in `xdevice_devicetest-6.1.0.210-py3-none-any.whl/devicetest/controllers/tools/recorder/proto/scrcpy_pb2.py`; it is not a public Huawei `.proto` source file and was not recovered by reverse engineering the device-side `.so`.
+* `crates/hscrcpy-host/src/video/mod.rs` owns route-neutral video ingress adapters consumed by `render/bringup.rs`.
+
+### Scenario: Official UITest gRPC Route Adapter
+
+#### 1. Scope / Trigger
+
+Use this contract when changing the official `uitest` projection route, generated scrcpy protobuf bindings, or the handoff from `ScrcpyService/onStart` into host H.264 rendering.
+
+#### 2. Signatures
+
+* CLI command: `hscrcpy-host-cli --device <id|auto> --route uitest --codec h264 [--ffplay-bin <path>] [--max-frames <n>] [--uitest-payload <path>]`
+* Build script: `crates/hscrcpy-host/build.rs`
+* Proto source: `crates/hscrcpy-host/proto/scrcpy.proto`
+* Generated include: `include!(concat!(env!("OUT_DIR"), "/scrcpy.rs"))` inside `crates/hscrcpy-host/src/official_scrcpy.rs`
+* Runtime path: `OfficialScrcpyClient::for_forwarded_local_tcp(port).start()`
+* Service methods:
+  * `/ScrcpyService/onStart`
+  * `/ScrcpyService/onEnd`
+  * `/ScrcpyService/onRequestIDRFrame`
+
+#### 3. Contracts
+
+* Keep the proto package-less so generated tonic paths remain `/ScrcpyService/<method>`.
+* Generated protobuf/gRPC types may be referenced inside `official_scrcpy.rs` only; CLI, renderer, and video modules consume route-neutral host types.
+* `ReplyMessage.payload` may contain mixed `ParamValue` entries. Exactly one `val_bytes` entry is treated as the H.264 access unit candidate; zero, empty, or multiple byte entries fail before renderer handoff.
+* `--route uitest` must never fall back to the HAP `hscrcpy-server` route after a selected-route failure.
+* Live H.264 preview writes access units to ffplay stdin (`-f h264 -i pipe:0`). Disk artifacts under `frames/` and `stream.h264` are diagnostics, not the playback source.
+
+#### 4. Validation & Error Matrix
+
+| Boundary | Required validation | Failure signal |
+|----------|---------------------|----------------|
+| Proto generation | `cargo check -p hscrcpy-host --offline` builds generated client | build script or generated include failure |
+| Route startup | selected route is `uitest` and selected codec is `h264` | route/phase error with no HAP fallback |
+| gRPC connect/start | target is forwarded local TCP, method is named in errors | `grpc-connect`, `grpc-start`, or `grpc-status` context |
+| Stream message conversion | exactly one non-empty `val_bytes` payload | `ContractViolation` before `OfficialScrcpyIngressAdapter` |
+| Renderer handoff | payload is Annex-B H.264 | H.264 ingress validation error |
+| Preview | ffplay consumes stdin pipe | `live_preview status=disabled` and `ffplay_write_*` diagnostics |
+
+#### 5. Good/Base/Bad Cases
+
+* Good: `official_scrcpy.rs` converts generated `ReplyMessage` into `OfficialScrcpyVideoMessage`, then `video/mod.rs` normalizes it into `PreparedVideoIngress::H264`.
+* Base: unit tests use a mock `OfficialScrcpyTransport` and generated message structs to verify conversion without opening a real gRPC socket.
+* Bad: CLI imports generated protobuf types, renderer knows about `ScrcpyService`, or a second hand-written protobuf decoder is kept as a production fallback.
+
+#### 6. Tests Required
+
+* `cargo check -p hscrcpy-host --offline`
+* `cargo test --workspace --offline -- --nocapture`
+* Unit tests asserting:
+  * generated single `val_bytes` payload maps to `VideoCodec::H264`
+  * missing/ambiguous/empty bytes payloads fail
+  * mock official stream feeds `BringupRenderSurface`
+  * unsupported route codec does not enter HAP session/video channels
+* Manual real-device check:
+  * `cargo run -p hscrcpy-host-cli -- --device auto --route uitest --codec h264 --ffplay-bin /opt/homebrew/bin/ffplay`
+  * Expected: ffplay displays frames, `captured frame 1 codec=h264` appears, and `diag window=full` summaries continue.
+
+#### 7. Wrong vs Correct
+
+##### Wrong
+
+* Reintroducing a production `h2` frame parser or manual protobuf decoder beside generated tonic/prost bindings.
+* Writing H.264 to disk and pointing ffplay at `stream.h264` for live playback.
+
+##### Correct
+
+* Use `tonic`/`prost` generated bindings for the gRPC boundary, isolate them in `official_scrcpy.rs`, and feed ffplay directly through stdin while keeping file artifacts optional diagnostics.
+
 ### Scenario: Introducing New Native Runtime Modules
 
 #### Scope / Trigger

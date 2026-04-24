@@ -1,0 +1,9 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check.md", "reason": "Code quality check spec"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Review registry tests and avoid playback expansion."}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Review extensible codec contract, selection matrix, and diagnostics requirements."}
+{"file": "crates/hscrcpy-contracts/src/capability.rs", "reason": "Review registry model and known codec names."}
+{"file": "crates/hscrcpy-contracts/src/session.rs", "reason": "Review Session codec descriptors and compatibility with startup handshake."}
+{"file": "crates/hscrcpy-host/src/session/startup.rs", "reason": "Review selection function integration and fallback diagnostics."}
+{"file": "crates/hscrcpy-host/src/video/mod.rs", "reason": "Review host codec support model and renderer compatibility."}
+{"file": "apps/hscrcpy-host-cli/src/main.rs", "reason": "Review CLI diagnostics for route-supported/host-supported/selected codec output."}

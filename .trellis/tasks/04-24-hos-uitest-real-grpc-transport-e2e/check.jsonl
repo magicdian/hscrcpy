@@ -1,0 +1,6 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check.md", "reason": "Code quality check spec"}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Review docs no longer describe real gRPC as deferred once implemented."}
+{"file": "crates/hscrcpy-host/src/session/startup.rs", "reason": "Review route-specific startup does not fall back to HAP and actually opens/render official stream frames."}
+{"file": "crates/hscrcpy-host/src/official_scrcpy.rs", "reason": "Review real gRPC serialization, receive limits, streaming iterator semantics, and error context."}
+{"file": "apps/hscrcpy-host-cli/src/main.rs", "reason": "Review CLI command behavior and max-frames/live-preview E2E behavior."}

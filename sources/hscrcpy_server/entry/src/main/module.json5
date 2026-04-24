@@ -20,6 +20,11 @@
         "name": "ohos.permission.INTERNET"
       }
     ],
+    "requestPermissions": [
+      {
+        "name": "ohos.permission.TIMEOUT_SCREENOFF_DISABLE_LOCK",
+      }
+    ],
     "abilities": [
       {
         "name": "EntryAbility",

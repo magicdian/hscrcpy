@@ -1,4 +1,6 @@
 use crate::hdc::HdcBridge;
+use crate::route::HostRoute;
+use crate::uitest::{UitestCompanionManager, UitestLaunchConfig};
 use crate::{HostError, HostResult};
 use hscrcpy_contracts::{ChannelEndpoint, PROTOCOL_MAJOR_MVP, PROTOCOL_MINOR_MVP};
 
@@ -83,6 +85,7 @@ impl BundledCompanionManifest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompanionLaunchRequest {
+    pub route: HostRoute,
     pub session_id: String,
     pub session_channel: ChannelEndpoint,
     pub video_channel: ChannelEndpoint,
@@ -323,6 +326,70 @@ where
     }
 }
 
+pub struct RouteCompanionManager<H>
+where
+    H: HdcBridge,
+{
+    delegate: RouteCompanionDelegate<H>,
+}
+
+impl<H> RouteCompanionManager<H>
+where
+    H: HdcBridge,
+{
+    pub fn new(route: HostRoute, hdc: H) -> Self {
+        Self::with_uitest_config(route, hdc, UitestLaunchConfig::default())
+    }
+
+    pub fn with_uitest_config(route: HostRoute, hdc: H, uitest_config: UitestLaunchConfig) -> Self {
+        let delegate = match route {
+            HostRoute::HscrcpyServer => {
+                RouteCompanionDelegate::HscrcpyServer(HdcCompanionManager::new(hdc))
+            }
+            HostRoute::Uitest => RouteCompanionDelegate::Uitest(
+                UitestCompanionManager::with_config(hdc, uitest_config),
+            ),
+        };
+        Self { delegate }
+    }
+}
+
+enum RouteCompanionDelegate<H>
+where
+    H: HdcBridge,
+{
+    HscrcpyServer(HdcCompanionManager<H>),
+    Uitest(UitestCompanionManager<H>),
+}
+
+impl<H> CompanionManager for RouteCompanionManager<H>
+where
+    H: HdcBridge,
+{
+    fn plan(&self, device_id: &str) -> HostResult<CompanionPlan> {
+        match &self.delegate {
+            RouteCompanionDelegate::HscrcpyServer(manager) => manager.plan(device_id),
+            RouteCompanionDelegate::Uitest(manager) => manager.plan(device_id),
+        }
+    }
+
+    fn apply(&self, device_id: &str, plan: &CompanionPlan) -> HostResult<()> {
+        match &self.delegate {
+            RouteCompanionDelegate::HscrcpyServer(manager) => manager.apply(device_id, plan),
+            RouteCompanionDelegate::Uitest(manager) => manager.apply(device_id, plan),
+        }
+    }
+
+    fn launch_session(&self, device_id: &str, request: &CompanionLaunchRequest) -> HostResult<()> {
+        match &self.delegate {
+            RouteCompanionDelegate::HscrcpyServer(manager) => {
+                manager.launch_session(device_id, request)
+            }
+            RouteCompanionDelegate::Uitest(manager) => manager.launch_session(device_id, request),
+        }
+    }
+}
+
 struct NoopCompanionRuntime;
 
 impl CompanionDeployRuntime for NoopCompanionRuntime {
@@ -495,9 +562,13 @@ mod tests {
     use super::{
         parse_bm_dump_output, BundledCompanionManager, BundledCompanionManifest, CompanionAction,
         CompanionDeployRuntime, CompanionDeployState, CompanionLaunchRequest, CompanionManager,
-        CompanionPlan, InstalledCompanionMetadata,
+        CompanionPlan, InstalledCompanionMetadata, RouteCompanionManager,
     };
+    use crate::hdc::HdcBridge;
+    use crate::route::HostRoute;
+    use crate::uitest::UitestLaunchConfig;
     use crate::{HostError, HostResult};
+    use hscrcpy_contracts::{ChannelEndpoint, TransportKind};
     use std::cell::RefCell;
 
     #[derive(Default)]
@@ -546,6 +617,27 @@ mod tests {
         ) -> HostResult<()> {
             self.actions.borrow_mut().push("launch".to_string());
             Ok(())
+        }
+    }
+
+    struct TestHdc;
+
+    impl HdcBridge for TestHdc {
+        fn ensure_device_visible(&self, _device_id: &str) -> HostResult<()> {
+            Ok(())
+        }
+
+        fn forward_port(
+            &self,
+            _device_id: &str,
+            _local_port: u16,
+            _remote_port: u16,
+        ) -> HostResult<()> {
+            Ok(())
+        }
+
+        fn exec_shell(&self, _device_id: &str, _command: &str) -> HostResult<String> {
+            Ok(String::new())
         }
     }
 
@@ -712,5 +804,33 @@ mod tests {
         let parsed =
             parse_bm_dump_output("cn.magicdian.hscrcpy.server", raw).expect("parse should succeed");
         assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn uitest_route_fails_payload_selection_before_launch_when_override_is_missing() {
+        let manager = RouteCompanionManager::with_uitest_config(
+            HostRoute::Uitest,
+            TestHdc,
+            UitestLaunchConfig::with_payload_override("/tmp/missing-hscrcpy-payload.so"),
+        );
+        let err = manager
+            .launch_session(
+                "device-1",
+                &CompanionLaunchRequest {
+                    route: HostRoute::Uitest,
+                    session_id: "session-1".to_string(),
+                    session_channel: ChannelEndpoint {
+                        transport: TransportKind::HdcForward,
+                        target: "127.0.0.1:27182".to_string(),
+                    },
+                    video_channel: ChannelEndpoint {
+                        transport: TransportKind::HdcForward,
+                        target: "127.0.0.1:27183".to_string(),
+                    },
+                },
+            )
+            .expect_err("missing uitest payload must fail before hdc launch");
+        assert!(matches!(err, HostError::PayloadSelection(_)));
+        assert!(err.to_string().contains("route `uitest`"));
     }
 }

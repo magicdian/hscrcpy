@@ -27,9 +27,16 @@
 
 ## 官方分发物位置
 
-### 本地下载包
+### 本地归档
 
-当前已确认的本地官方包路径：
+当前仓库内已归档官方 so：
+
+- [`third_party/hypium/hosScrcpy/6.1.0.210/libscrcpy`](/Users/magicdian/Documents/personal_project/hscrcpy/third_party/hypium/hosScrcpy/6.1.0.210/libscrcpy)
+- [`third_party/hypium/hosScrcpy/6.1.0.210/uitest_agent`](/Users/magicdian/Documents/personal_project/hscrcpy/third_party/hypium/hosScrcpy/6.1.0.210/uitest_agent)
+- [`third_party/hypium/xdevice-devicetest/6.1.0.210/recorder`](/Users/magicdian/Documents/personal_project/hscrcpy/third_party/hypium/xdevice-devicetest/6.1.0.210/recorder)
+- [`third_party/hypium/xdevice-devicetest/6.1.0.210/uitest_agent`](/Users/magicdian/Documents/personal_project/hscrcpy/third_party/hypium/xdevice-devicetest/6.1.0.210/uitest_agent)
+
+原始官方下载包路径：
 
 - [`/Users/magicdian/Downloads/devecotesting-hypium-6.1.0.210`](/Users/magicdian/Downloads/devecotesting-hypium-6.1.0.210)
 
@@ -76,7 +83,7 @@
 - 启动投屏会话
 - 创建虚拟屏
 - 绑定平台编码器 surface
-- 输出 `H.264`
+- 当前已验证输出 `H.264`
 - 通过 `gRPC` 回传码流
 - 响应 `RequestIDRFrame`
 
@@ -170,6 +177,12 @@ desktop
    - `onEnd`
    - `onRequestIDRFrame`
 
+### `scrcpy.proto` 来源说明
+
+仓库内的 [`crates/hscrcpy-host/proto/scrcpy.proto`](/Users/magicdian/Documents/personal_project/hscrcpy/crates/hscrcpy-host/proto/scrcpy.proto) 是从本地 `xdevice_devicetest-6.1.0.210-py3-none-any.whl/devicetest/controllers/tools/recorder/proto/scrcpy_pb2.py` 的 generated descriptor 还原出来的 observed schema。
+
+它不是公开发布的华为官方 `.proto` 源文件，也不是从 `libscrcpy_server*.z.so` 反编译得到。该 schema 当前无 `package` 声明，host 侧保持 package-less 生成，确保 gRPC 方法路径仍是 `/ScrcpyService/onStart`、`/ScrcpyService/onEnd` 和 `/ScrcpyService/onRequestIDRFrame`。
+
 ### `screen_agent.py`
 
 官方 `screen_agent.py` 负责截图与屏幕采集相关逻辑，和 `UITest/Hypium` 截图链路配合使用。
@@ -251,6 +264,80 @@ hdc fport ls
 ```bash
 DEVICE="$(hdc list targets | awk 'NR==1{print $1}')"
 hdc -t "$DEVICE" shell 'hilog -x | grep -E "xdevice_scrcpy|scrcpy_grpc_socket|screen_record|uitest|hypium|UiTestKit_Addon|CreateVirtualScreen|video/avc"'
+```
+
+## 当前 host 手动验证命令
+
+### HAP fallback / debug 路线
+
+这条路线用于验证当前自研 HAP companion、session/video channel、codec selection 和 bring-up renderer：
+
+```bash
+cargo run -p hscrcpy-host-cli -- \
+  --device auto \
+  --route hscrcpy-server \
+  --codec h264 \
+  --max-frames 30 \
+  --output-dir /tmp/hscrcpy-preview
+```
+
+JPEG fallback 调试：
+
+```bash
+cargo run -p hscrcpy-host-cli -- \
+  --device auto \
+  --route hscrcpy-server \
+  --codec jpeg \
+  --max-frames 30 \
+  --output-dir /tmp/hscrcpy-preview \
+  --no-live-preview
+```
+
+期望产物：
+
+- `preview.html`
+- `latest.jpg` 和 `frames/*.jpg`（JPEG 路线）
+- `frames/*.h264` 和 `stream.h264`（H.264 路线）
+- `<session-dir>/events.log` 中的 host render diagnostics
+
+### UITest real gRPC / ffplay 路线
+
+这条路线用于验证官方 `libscrcpy_server*.z.so` 的完整投屏路径：payload selection、push、stale process kill、`uitest start-daemon`、`scrcpy_grpc_socket` fport、host 侧 `tonic` + `prost` generated gRPC client、H.264 ingress 和 ffplay。
+
+```bash
+cargo run -p hscrcpy-host-cli -- \
+  --device auto \
+  --route uitest \
+  --codec h264 \
+  --uitest-payload third_party/hypium/hosScrcpy/6.1.0.210/libscrcpy/libscrcpy_server_unix_6.5-20260313.z.so \
+  --max-frames 30 \
+  --output-dir /tmp/hscrcpy-uitest-preview \
+  --ffplay-bin /opt/homebrew/bin/ffplay
+```
+
+当前预期结果：
+
+- stale process scan / kill、payload push、daemon launch、socket forwarding、payload cleanup 的失败会带 `route`、`phase`、`target` 和 HDC stdout/stderr。
+- stream 成功时，host 会调用 `ScrcpyService/onStart`，把官方 H.264 bytes 经 `OfficialScrcpyIngressAdapter` 转成 route-neutral ingress，写入 `frames/*.h264` / `stream.h264`，并把同一 access unit 写给 ffplay。
+- `--max-frames <n>` 达到后，host 会调用 `ScrcpyService/onEnd`；如果 stop 失败，错误应包含 `route=uitest`、`grpc-stop`、`/ScrcpyService/onEnd`、payload 和 codec。
+- gRPC/协议失败时，错误应包含 `grpc-connect`、`grpc-start`、`grpc-status`、`grpc-stream` 或 generated message conversion 等阶段，以及 `/ScrcpyService/onStart`、`127.0.0.1:27182` 和 `max_receive_message_bytes=10485760`。
+- 只有 ffplay 显示真实设备画面，且 `<session-dir>/events.log` 有 H.264 frame/diag 记录时，才算 real-device `--route uitest` H.264 E2E 成功。
+
+### 设备现场检查
+
+```bash
+DEVICE="$(hdc list targets | awk 'NR==1{print $1}')"
+
+hdc -t "$DEVICE" shell \
+  'ps -ef | grep -E "[x]device_scrcpy|[u]itest start-daemon|[h]scrcpy"'
+
+hdc -t "$DEVICE" shell \
+  'cat /proc/net/unix | grep -E "scrcpy_grpc_socket|screen_record_grpc_socket|uitest_socket"'
+
+hdc fport ls
+
+hdc -t "$DEVICE" shell \
+  'hilog -x | grep -E "xdevice_scrcpy|scrcpy_grpc_socket|screen_record|uitest|hypium|UiTestKit_Addon|CreateVirtualScreen|video/avc|hscrcpyDiag"'
 ```
 
 ### 抓设备现场 so
@@ -356,14 +443,27 @@ uitest start-daemon singleness \
 
 当前最稳妥的推进顺序：
 
-1. 保留现有 `AVScreenCapture` 主链路继续推进 host 解码渲染
-2. 将 [`docs/uitest-extension-poc.md`](/Users/magicdian/Documents/personal_project/hscrcpy/docs/uitest-extension-poc.md) 保留为实验记录，而不是当前主线方案
-3. 如需继续这条线，只研究：
+1. 将官方 `uitest` scrcpy server 路线作为 host 投屏主路径推进
+2. 保留现有 HAP / `AVScreenCapture` 链路作为 fallback 和自研实现演进路径
+3. 将 [`docs/uitest-extension-poc.md`](/Users/magicdian/Documents/personal_project/hscrcpy/docs/uitest-extension-poc.md) 保留为实验记录，而不是当前主线方案
+4. 如需继续自制 extension 这条线，只研究：
    - `XPM`
    - 代码签名使能
    - HAP/HQF 部署后的 extension 装载条件
-4. 按官方 `hosScrcpy` 的会话参数、socket 和生命周期收紧自研方案
-5. 等到装载校验问题被实证解决后，再决定是否恢复完整 `scrcpy server` 风格实现
+5. 按官方 `hosScrcpy` 的会话参数、socket 和生命周期收紧自研方案
+6. 等到装载校验问题被实证解决后，再决定是否恢复完整 `scrcpy server` 风格实现
+
+### 编码能力演进
+
+当前链路打通优先基于 `H.264`，但能力探测不应写死在 `H.264` / `H.265` / `JPEG` 三个值上。
+
+后续 host 启动前应保留一层 codec capability registry：
+
+- 设备 / route 侧探测或推断可编码 codec
+- host 侧探测可解码 codec
+- 选择双方都支持且用户偏好允许的 codec
+- 当前实现只要求 `H.264` 端到端可用
+- 未来可逐步加入 `H.265`、`H.266/VVC`、`VP9`、`AV1`、`JPEG` 或其他 codec
 
 需要避免的误区：
 

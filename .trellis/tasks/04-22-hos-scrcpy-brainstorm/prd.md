@@ -9,12 +9,11 @@ Build an open-source, free, cross-platform HarmonyOS screen mirroring tool inspi
 * The repository is currently a greenfield project with only a minimal `README.md`.
 * The intended product is a cross-platform HarmonyOS device mirroring tool similar to scrcpy.
 * Rust is the preferred implementation language.
-* Candidate video transport or encoding paths mentioned so far are H.265, H.264, and JPEG.
+* Candidate video transport or encoding paths include H.264 for current bringup, with H.265, H.266/VVC, VP9, AV1, JPEG, and other codecs reserved for capability probing and later route support.
 * Target product direction is "the smoothest" open-source and free mirroring experience, with a stretch goal around 120 FPS.
 * Comparable projects mentioned by the user:
   * `HOScrcpy`
   * `ohscrcpy`
-  * `HoKit`
 * Initial repo inspection of comparable tools shows a strong shared pattern:
   * desktop host app
   * HDC-based device connectivity
@@ -61,7 +60,8 @@ Build an open-source, free, cross-platform HarmonyOS screen mirroring tool inspi
   * video mirroring
   * input control
   * automatic resolution / rotation adaptation
-  * automatic downgrade between `H.264` and `JPEG`
+  * startup-time codec matching across device encode capability and host decode capability
+  * automatic downgrade through a route-neutral codec capability registry, with `H.264` as the first implementation target
 * The desktop host must automatically install or update the device-side companion instead of requiring manual setup for normal use.
 * First use may require a one-time authorization or configuration step on the HarmonyOS device, but subsequent launches should be as desktop-driven and hands-off as possible.
 
@@ -98,11 +98,9 @@ Build an open-source, free, cross-platform HarmonyOS screen mirroring tool inspi
 * Initial external references provided by the user:
   * `https://gitcode.com/OpenHarmonyToolkitsPlaza/HOScrcpy`
   * `https://gitee.com/cleefun/ohscrcpy`
-  * `https://github.com/yabi-zzh/HoKit`
 * Comparable project observations:
   * `ohscrcpy` is a lightweight demo that pushes a `scrcpy_server`-style binary to device over HDC, forwards a TCP port, and sends JPEG frames to a desktop client.
   * `HOScrcpy` packages a Java SDK around HarmonyOS remote capture, exposes H.264 stream mode and image mode, and documents configurable bitrate, port, I-frame interval, and frame rate with a default of 120 FPS.
-  * `HoKit` positions H.264 as the high-performance path and JPEG as compatibility fallback, and treats audio sync plus input tooling as add-on services.
 * OpenHarmony media capability findings:
   * AVCodec capability APIs allow runtime querying of supported hardware/software codecs and limits per device.
   * OpenHarmony AVCodec documentation explicitly documents hardware encode/decode around H.264 and H.265.
@@ -110,9 +108,10 @@ Build an open-source, free, cross-platform HarmonyOS screen mirroring tool inspi
   * OpenHarmony documents temporal scalability features for video encoding, which is relevant for adaptive frame dropping under constrained transport or host decode conditions.
 * Architecture implications:
   * JPEG is the easiest fully open fallback but is unlikely to be the best path for a "silky" experience at high FPS because bandwidth and CPU cost scale poorly.
-  * H.264 is the practical default for MVP because ecosystem support and decode support are strongest across desktop hosts.
-  * H.265 is valuable as an optional high-efficiency path, but should not be the only path due to broader licensing and compatibility concerns.
-  * Runtime codec capability probing on the device is mandatory; codec choice should be negotiated per session instead of hard-coded.
+  * H.264 is the practical first implementation target because ecosystem support and decode support are strongest across desktop hosts.
+  * H.265, H.266/VVC, VP9, AV1, and later codecs should be represented as probeable capabilities rather than excluded by the contract.
+  * Runtime codec capability probing on the device is mandatory; host decoder capability probing is also required before selecting any non-JPEG video codec.
+  * Codec choice should be negotiated per session instead of hard-coded, and this rule applies to both the `uitest` route and the HAP route.
 * A Rust host can own session orchestration, transport, decode integration, rendering, and cross-platform packaging even if the device-side agent starts as Harmony native C/C++.
 * Local project-structure implications:
   * The current template should be treated as a shell, not as the final architecture.
@@ -126,8 +125,7 @@ Build an open-source, free, cross-platform HarmonyOS screen mirroring tool inspi
 
 * `ohscrcpy` uses HDC to deploy a device-side executable, forwards a local TCP port, and streams JPEG frames to a native desktop client.
 * `HOScrcpy` exposes both H.264 video stream mode and image-stream mode through a Java SDK, plus control injection and layout inspection.
-* `HoKit` markets H.264 for low-latency high-FPS mirroring and keeps JPEG as fallback; audio sync is treated as a separate optional service.
-* Upstream `scrcpy` itself now supports H.264, H.265, and AV1 for video, and OPUS, AAC, and RAW for audio, but that does not imply HarmonyOS device-side support for all of them.
+* Upstream `scrcpy` itself now supports multiple video codecs such as H.264, H.265, and AV1, and OPUS, AAC, and RAW for audio, but that does not imply HarmonyOS device-side support for all of them.
 
 ### Constraints from platform and project
 
@@ -143,15 +141,16 @@ Build an open-source, free, cross-platform HarmonyOS screen mirroring tool inspi
 **Approach A: Hybrid codec ladder** (Recommended)
 
 * How it works:
-  * Device agent negotiates codec support at runtime.
-  * MVP ships with `H.264` as primary, `JPEG` as compatibility fallback, and reserves `H.265` as an opt-in experimental path.
+  * Device agent probes encoder support at runtime.
+  * Host probes decoder/render support at runtime.
+  * MVP starts by carrying H.264 end-to-end, while the negotiation model can represent additional codecs such as H.265, H.266/VVC, VP9, AV1, and JPEG as route capabilities mature.
 * Pros:
   * Strongest chance of a usable MVP quickly.
   * Matches what current HarmonyOS mirroring tools appear to do.
   * Keeps a fully open fallback path.
 * Cons:
-  * Still depends on H.264 availability for best experience.
-  * Requires maintaining two or three paths.
+  * Still depends on H.264 availability for the first high-quality bringup.
+  * Requires maintaining a codec registry and route-specific capability mapping.
 
 **Approach B: JPEG-first universal path**
 
@@ -167,7 +166,7 @@ Build an open-source, free, cross-platform HarmonyOS screen mirroring tool inspi
 **Approach C: H.26x-first performance path**
 
 * How it works:
-  * Prioritize H.264 and H.265, treat JPEG as debug-only or emergency fallback.
+  * Prioritize compressed video codecs such as H.264 first, then add H.265 and later codecs when both route and host support are verified. Treat JPEG as debug-only or emergency fallback.
 * Pros:
   * Best chance at low latency and high frame rate.
   * Cleaner rendering pipeline.
@@ -179,7 +178,7 @@ Build an open-source, free, cross-platform HarmonyOS screen mirroring tool inspi
 
 **Context**: The product aims to be the smoothest open-source and free HarmonyOS mirroring tool, while still being practical to build and distribute as a greenfield project.
 
-**Decision**: Use a scrcpy-like host/device split for MVP, with `H.264` as the primary video path, `JPEG` as compatibility fallback, and `H.265` reserved as an experimental or later-stage path. MVP scope includes screen mirroring, input control, and automatic display adaptation. The desktop host is responsible for installing, updating, and starting the device-side companion.
+**Decision**: Use a scrcpy-like host/device split for MVP, with `H.264` as the first end-to-end video path and a route-neutral codec capability registry for future H.265, H.266/VVC, VP9, AV1, JPEG, and other codecs. MVP scope includes screen mirroring, input control, and automatic display adaptation. The desktop host is responsible for installing, updating, and starting the device-side companion.
 
 **Consequences**:
 

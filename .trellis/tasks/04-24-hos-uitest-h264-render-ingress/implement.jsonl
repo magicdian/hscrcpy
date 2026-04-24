@@ -1,0 +1,13 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Ingress conversion belongs in host adapter/video modules, not CLI/render-specific protocol code."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Malformed official stream payloads must fail with route/protocol diagnostics before renderer presentation."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Renderer-facing integration needs deterministic tests and must not fake real gRPC end-to-end success."}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "H.264 ingress timing and render diagnostics must keep existing summary-oriented behavior."}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Contract requires uitest and HAP routes to feed route-neutral H.264 ingress and renderer APIs."}
+{"file": "crates/hscrcpy-host/src/official_scrcpy.rs", "reason": "Worker 4 exposes official stream messages and deferred real gRPC transport; use this output as source."}
+{"file": "crates/hscrcpy-host/src/video/mod.rs", "reason": "Existing PreparedVideoIngress/H264 validation is renderer-facing route-neutral boundary."}
+{"file": "crates/hscrcpy-host/src/video/h264.rs", "reason": "H.264 access unit validation currently expects Annex-B and IDR for keyframes."}
+{"file": "crates/hscrcpy-host/src/render/bringup.rs", "reason": "Existing render surface writes .h264 artifacts, stream.h264, live preview, and timing summaries."}
+{"file": "crates/hscrcpy-host/src/uitest.rs", "reason": "Worker 3 route lifecycle provides local forwarded endpoint but real gRPC transport is still deferred."}
+{"file": "apps/hscrcpy-host-cli/src/main.rs", "reason": "CLI capture loop currently consumes SessionRuntime video ingress; do not claim real uitest capture until transport exists."}

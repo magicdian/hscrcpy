@@ -1,4 +1,5 @@
 use crate::{HostError, HostResult};
+use std::path::Path;
 use std::process::Command;
 use std::sync::Mutex;
 
@@ -6,8 +7,86 @@ const AUTO_DEVICE_ID: &str = "auto";
 
 pub trait HdcBridge {
     fn ensure_device_visible(&self, device_id: &str) -> HostResult<()>;
+    fn forward(&self, device_id: &str, spec: &HdcForwardSpec) -> HostResult<()> {
+        match (&spec.local, &spec.remote) {
+            (HdcForwardEndpoint::Tcp(local_port), HdcForwardEndpoint::Tcp(remote_port)) => {
+                self.forward_port(device_id, *local_port, *remote_port)
+            }
+            _ => Err(HostError::ContractViolation(format!(
+                "hdc bridge does not support forwarding {} to {}",
+                spec.local, spec.remote
+            ))),
+        }
+    }
     fn forward_port(&self, device_id: &str, local_port: u16, remote_port: u16) -> HostResult<()>;
+    fn push_file(&self, _device_id: &str, local_path: &Path, remote_path: &str) -> HostResult<()> {
+        Err(HostError::ContractViolation(format!(
+            "hdc bridge does not support file push from {} to {remote_path}",
+            local_path.display()
+        )))
+    }
     fn exec_shell(&self, device_id: &str, command: &str) -> HostResult<String>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HdcForwardSpec {
+    pub local: HdcForwardEndpoint,
+    pub remote: HdcForwardEndpoint,
+}
+
+impl HdcForwardSpec {
+    pub const fn tcp_to_tcp(local_port: u16, remote_port: u16) -> Self {
+        Self {
+            local: HdcForwardEndpoint::Tcp(local_port),
+            remote: HdcForwardEndpoint::Tcp(remote_port),
+        }
+    }
+
+    pub fn tcp_to_localabstract(local_port: u16, socket_name: impl Into<String>) -> Self {
+        Self {
+            local: HdcForwardEndpoint::Tcp(local_port),
+            remote: HdcForwardEndpoint::LocalAbstract(socket_name.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HdcForwardEndpoint {
+    Tcp(u16),
+    LocalAbstract(String),
+}
+
+impl HdcForwardEndpoint {
+    fn to_hdc_arg(&self) -> HostResult<String> {
+        match self {
+            Self::Tcp(port) => {
+                if *port == 0 {
+                    return Err(HostError::ContractViolation(
+                        "hdc tcp forwarding endpoint requires a non-zero port".to_string(),
+                    ));
+                }
+                Ok(format!("tcp:{port}"))
+            }
+            Self::LocalAbstract(socket_name) => {
+                let socket_name = socket_name.trim();
+                if socket_name.is_empty() {
+                    return Err(HostError::ContractViolation(
+                        "hdc localabstract forwarding endpoint requires a socket name".to_string(),
+                    ));
+                }
+                Ok(format!("localabstract:{socket_name}"))
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for HdcForwardEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tcp(port) => write!(f, "tcp:{port}"),
+            Self::LocalAbstract(socket_name) => write!(f, "localabstract:{socket_name}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,11 +250,42 @@ impl HdcBridge for RuntimeHdcBridge {
         )))
     }
 
-    fn forward_port(&self, device_id: &str, local_port: u16, remote_port: u16) -> HostResult<()> {
+    fn forward(&self, device_id: &str, spec: &HdcForwardSpec) -> HostResult<()> {
         let device_id = validate_device_id(device_id)?;
-        if local_port == 0 || remote_port == 0 {
+        if !matches!(spec.local, HdcForwardEndpoint::Tcp(_)) {
+            return Err(HostError::ContractViolation(format!(
+                "hdc fport requires a local tcp endpoint, got {}",
+                spec.local
+            )));
+        }
+
+        let local = spec.local.to_hdc_arg()?;
+        let remote = spec.remote.to_hdc_arg()?;
+        let resolved_target = self.resolve_device_target(device_id)?;
+        let args = vec![
+            "-t".to_string(),
+            resolved_target.clone(),
+            "fport".to_string(),
+            local,
+            remote,
+        ];
+        self.run_checked("forward endpoint", Some(&resolved_target), &args)?;
+        Ok(())
+    }
+
+    fn forward_port(&self, device_id: &str, local_port: u16, remote_port: u16) -> HostResult<()> {
+        self.forward(
+            device_id,
+            &HdcForwardSpec::tcp_to_tcp(local_port, remote_port),
+        )
+    }
+
+    fn push_file(&self, device_id: &str, local_path: &Path, remote_path: &str) -> HostResult<()> {
+        let device_id = validate_device_id(device_id)?;
+        let remote_path = remote_path.trim();
+        if remote_path.is_empty() {
             return Err(HostError::ContractViolation(
-                "port forwarding requires non-zero local and remote ports".to_string(),
+                "hdc file push requires a non-empty remote path".to_string(),
             ));
         }
 
@@ -183,11 +293,12 @@ impl HdcBridge for RuntimeHdcBridge {
         let args = vec![
             "-t".to_string(),
             resolved_target.clone(),
-            "fport".to_string(),
-            format!("tcp:{local_port}"),
-            format!("tcp:{remote_port}"),
+            "file".to_string(),
+            "send".to_string(),
+            local_path.display().to_string(),
+            remote_path.to_string(),
         ];
-        self.run_checked("forward port", Some(&resolved_target), &args)?;
+        self.run_checked("file send", Some(&resolved_target), &args)?;
         Ok(())
     }
 
@@ -253,6 +364,10 @@ impl HdcBridge for StubHdcBridge {
         RuntimeHdcBridge::default().forward_port(device_id, local_port, remote_port)
     }
 
+    fn push_file(&self, device_id: &str, local_path: &Path, remote_path: &str) -> HostResult<()> {
+        RuntimeHdcBridge::default().push_file(device_id, local_path, remote_path)
+    }
+
     fn exec_shell(&self, device_id: &str, command: &str) -> HostResult<String> {
         RuntimeHdcBridge::default().exec_shell(device_id, command)
     }
@@ -260,9 +375,13 @@ impl HdcBridge for StubHdcBridge {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommandOutput, CommandRunner, HdcBridge, HostError, HostResult, RuntimeHdcBridge};
+    use super::{
+        CommandOutput, CommandRunner, HdcBridge, HdcForwardSpec, HostError, HostResult,
+        RuntimeHdcBridge,
+    };
     use std::cell::RefCell;
     use std::collections::VecDeque;
+    use std::path::Path;
     use std::rc::Rc;
 
     #[derive(Default)]
@@ -401,6 +520,62 @@ mod tests {
                     "fport".to_string(),
                     "tcp:27182".to_string(),
                     "tcp:27183".to_string(),
+                ],
+            )]
+        );
+    }
+
+    #[test]
+    fn forward_supports_localabstract_remote_endpoint() {
+        let runner = MockRunner::with_scripted_results(vec![success("")]);
+        let bridge = RuntimeHdcBridge::with_runner("hdc-test", runner.clone());
+
+        bridge
+            .forward(
+                "SERIAL_A",
+                &HdcForwardSpec::tcp_to_localabstract(27182, "scrcpy_grpc_socket"),
+            )
+            .expect("localabstract forwarding should succeed");
+
+        assert_eq!(
+            runner.invocations(),
+            vec![(
+                "hdc-test".to_string(),
+                vec![
+                    "-t".to_string(),
+                    "SERIAL_A".to_string(),
+                    "fport".to_string(),
+                    "tcp:27182".to_string(),
+                    "localabstract:scrcpy_grpc_socket".to_string(),
+                ],
+            )]
+        );
+    }
+
+    #[test]
+    fn push_file_uses_hdc_file_send() {
+        let runner = MockRunner::with_scripted_results(vec![success("")]);
+        let bridge = RuntimeHdcBridge::with_runner("hdc-test", runner.clone());
+
+        bridge
+            .push_file(
+                "SERIAL_A",
+                Path::new("third_party/payload.so"),
+                "/data/local/tmp/scrcpy_server.so",
+            )
+            .expect("file send should succeed");
+
+        assert_eq!(
+            runner.invocations(),
+            vec![(
+                "hdc-test".to_string(),
+                vec![
+                    "-t".to_string(),
+                    "SERIAL_A".to_string(),
+                    "file".to_string(),
+                    "send".to_string(),
+                    "third_party/payload.so".to_string(),
+                    "/data/local/tmp/scrcpy_server.so".to_string(),
                 ],
             )]
         );

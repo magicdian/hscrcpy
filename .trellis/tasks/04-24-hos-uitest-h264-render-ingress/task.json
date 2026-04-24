@@ -1,0 +1,53 @@
+{
+  "id": "hos-uitest-h264-render-ingress",
+  "name": "hos-uitest-h264-render-ingress",
+  "title": "UITest H264 ingress to renderer",
+  "description": "Convert official gRPC stream messages into normalized H.264 video ingress and feed the existing preview/render path.",
+  "status": "completed",
+  "dev_type": "backend",
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "magicdian",
+  "assignee": "magicdian",
+  "createdAt": "2026-04-24",
+  "completedAt": "2026-04-24",
+  "branch": null,
+  "base_branch": "dev",
+  "worktree_path": null,
+  "current_phase": 0,
+  "next_action": [
+    {
+      "phase": 1,
+      "action": "brainstorm"
+    },
+    {
+      "phase": 2,
+      "action": "research"
+    },
+    {
+      "phase": 3,
+      "action": "implement"
+    },
+    {
+      "phase": 4,
+      "action": "check"
+    },
+    {
+      "phase": 5,
+      "action": "update-spec"
+    },
+    {
+      "phase": 6,
+      "action": "record-session"
+    }
+  ],
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "04-23-hos-host-launch-readiness",
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

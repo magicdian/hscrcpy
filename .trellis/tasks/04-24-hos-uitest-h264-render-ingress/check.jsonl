@@ -1,0 +1,7 @@
+{"file": ".opencode/commands/trellis/finish-work.md", "reason": "Finish work checklist"}
+{"file": ".opencode/commands/trellis/check.md", "reason": "Code quality check spec"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Review tests and avoid overclaiming true e2e route support."}
+{"file": "docs/architecture/host-device-mvp-contract.md", "reason": "Review route-neutral ingress and documented real gRPC dependency blocker."}
+{"file": "crates/hscrcpy-host/src/official_scrcpy.rs", "reason": "Review official message conversion and protocol isolation."}
+{"file": "crates/hscrcpy-host/src/video/mod.rs", "reason": "Review H.264 ingress conversion into PreparedVideoIngress."}
+{"file": "crates/hscrcpy-host/src/render/bringup.rs", "reason": "Review artifact/live preview behavior remains route-neutral."}
