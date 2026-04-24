@@ -5,8 +5,9 @@ use tokio::runtime::Runtime;
 use tonic::transport::{Channel, Endpoint};
 
 pub const DEFAULT_MAX_RECEIVE_MESSAGE_BYTES: usize = 10 * 1024 * 1024;
-const GRPC_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const GRPC_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 const GRPC_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+const GRPC_STREAM_POLL_TIMEOUT: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OfficialScrcpyClientConfig {
@@ -272,13 +273,22 @@ impl Iterator for TonicGrpcStartStream {
             return None;
         }
 
-        match self.runtime.block_on(self.inner.message()) {
-            Ok(Some(message)) => Some(Ok(message)),
-            Ok(None) => {
+        match self.runtime.block_on(async {
+            tokio::time::timeout(GRPC_STREAM_POLL_TIMEOUT, self.inner.message()).await
+        }) {
+            Err(_) => Some(Err(HostError::ReceiveTimeout(format!(
+                "official scrcpy gRPC route=uitest phase=grpc-stream target `{}` method `{}` max_receive_message_bytes={} timed out after {}ms",
+                self.target,
+                self.method,
+                self.max_receive_message_bytes,
+                GRPC_STREAM_POLL_TIMEOUT.as_millis()
+            )))),
+            Ok(Ok(Some(message))) => Some(Ok(message)),
+            Ok(Ok(None)) => {
                 self.complete = true;
                 None
             }
-            Err(error) => {
+            Ok(Err(error)) => {
                 self.complete = true;
                 Some(Err(HostError::TransportFailure(format!(
                     "official scrcpy gRPC route=uitest phase=grpc-stream target `{}` method `{}` max_receive_message_bytes={}: {error}",
@@ -661,7 +671,7 @@ mod tests {
             .expect("official h264 message should normalize");
 
         let temp = TestDir::new("render");
-        let mut surface = BringupRenderSurface::new(temp.path());
+        let mut surface = BringupRenderSurface::new(temp.path()).with_h264_artifact_recording();
         surface
             .initialize_session(RenderSessionDescriptor {
                 session_id: "official-h264".to_string(),
@@ -679,7 +689,13 @@ mod tests {
         assert_eq!(artifact.timestamp_micros, 0);
         assert_eq!(surface.stats().h264_access_units, 1);
         assert_eq!(
-            fs::read(&artifact.artifact_path).expect("frame artifact should exist"),
+            fs::read(
+                artifact
+                    .artifact_path
+                    .as_ref()
+                    .expect("h264 artifact path should exist")
+            )
+            .expect("frame artifact should exist"),
             access_unit
         );
         let session_dir = surface.session_dir().expect("session dir should exist");

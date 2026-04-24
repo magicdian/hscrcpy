@@ -19,7 +19,7 @@ const H264_SESSION_PREVIEW = {
         encoderKind: 'hardware',
         maxWidth: 1920,
         maxHeight: 1080,
-        maxFps: 60,
+        maxFps: 120,
         bitrateControl: 'vbr',
       },
       {
@@ -149,7 +149,7 @@ const JPEG_SESSION_PREVIEW = {
         encoderKind: 'hardware',
         maxWidth: 1920,
         maxHeight: 1080,
-        maxFps: 60,
+        maxFps: 120,
         bitrateControl: 'vbr',
       },
       {

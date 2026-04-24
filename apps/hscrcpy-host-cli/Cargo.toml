@@ -8,3 +8,4 @@ authors.workspace = true
 [dependencies]
 hscrcpy-contracts.workspace = true
 hscrcpy-host.workspace = true
+libc.workspace = true

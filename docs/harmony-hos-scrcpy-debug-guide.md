@@ -85,7 +85,7 @@
 - 绑定平台编码器 surface
 - 当前已验证输出 `H.264`
 - 通过 `gRPC` 回传码流
-- 响应 `RequestIDRFrame`
+- 暴露 `RequestIDRFrame`
 
 关键指纹：
 
@@ -176,6 +176,13 @@ desktop
    - `onStart`
    - `onEnd`
    - `onRequestIDRFrame`
+
+2026-04-24 实机对照官方 `hosScrcpy` Java API 后的结论：
+
+- 官方 scrcpy 启动参数为 `-scale 1 -frameRate 120 -bitRate 31457280 -p 5000 -iFrameInterval 2000`，未携带 `repeatInterval`。
+- 官方启动路径会执行 best-effort `power-shell wakeup`，但不会自动调用 `onRequestIDRFrame`。
+- 静止画面下，官方 API 也可能长时间没有首个可解码 H.264 数据；这说明“需要画面变化才启动”不是 ffplay 独有问题。
+- 启动期主动调用 `onRequestIDRFrame` 在当前设备/so 组合上会导致 `onStart` 流关闭或重启，因此 host 默认不应自动请求 IDR，只保留为诊断/控制方法。
 
 ### `scrcpy.proto` 来源说明
 
@@ -297,7 +304,7 @@ cargo run -p hscrcpy-host-cli -- \
 
 - `preview.html`
 - `latest.jpg` 和 `frames/*.jpg`（JPEG 路线）
-- `frames/*.h264` 和 `stream.h264`（H.264 路线）
+- H.264 默认只走 ffplay stdin 实时预览和 `<session-dir>/events.log` timing 诊断；只有增加 `--record-h264` 时才写 `frames/*.h264` 和 `stream.h264`
 - `<session-dir>/events.log` 中的 host render diagnostics
 
 ### UITest real gRPC / ffplay 路线
@@ -315,12 +322,30 @@ cargo run -p hscrcpy-host-cli -- \
   --ffplay-bin /opt/homebrew/bin/ffplay
 ```
 
+Recorder-mode experiment:
+
+```bash
+cargo run -p hscrcpy-host-cli -- \
+  --device auto \
+  --route uitest \
+  --codec h264 \
+  --uitest-flavor recorder \
+  --ffplay-bin /opt/homebrew/bin/ffplay
+```
+
 当前预期结果：
 
 - stale process scan / kill、payload push、daemon launch、socket forwarding、payload cleanup 的失败会带 `route`、`phase`、`target` 和 HDC stdout/stderr。
-- stream 成功时，host 会调用 `ScrcpyService/onStart`，把官方 H.264 bytes 经 `OfficialScrcpyIngressAdapter` 转成 route-neutral ingress，写入 `frames/*.h264` / `stream.h264`，并把同一 access unit 写给 ffplay。
+- host Rust 日志默认输出到 `debug` 级别；可用 `HSCRCPY_LOG=trace|debug|info|warn|error|off` 控制。recorder bringup 会打印每次 payload / forward 组合的尝试和失败原因。
+- 默认 `--uitest-flavor scrcpy` 使用 `hosScrcpy/libscrcpy_server_unix_*`、远端 `/data/local/tmp/scrcpy_server.so`、`scrcpy_grpc_socket` 和 HoKit-observed scrcpy 参数。
+- `--uitest-flavor recorder` 使用 `xdevice-devicetest/recorder/libscrcpy_server*.z.so`、远端 `/data/local/tmp/libscreen_recorder.z.so` 和 official `record_agent.py` 形态的 `-p 5001 -m 1 -screenId <id>` 参数；当前 host 按 device TCP `5001` 做 `hdc fport`，不再等待未观测到的 `screen_record_grpc_socket`。
+- recorder flavor 会按文件名倒序尝试 bundled `libscrcpy_server*.z.so`；如果某个 payload 启动后 `libscreen_recorder` 进程没有保持存活，会清理后尝试下一个 payload。每个 payload 会先试 `tcp:<local> -> tcp:5001`，再试 `tcp:<local> -> localabstract:screen_record_grpc_socket`，两种模式都保持先 fport 再启动 daemon。
+- stream 成功时，host 会调用 `ScrcpyService/onStart`，把官方 H.264 bytes 经 `OfficialScrcpyIngressAdapter` 转成 route-neutral ingress，并把 access unit 写给 ffplay stdin。`frames/*.h264` / `stream.h264` 只在增加 `--record-h264` 时写入。
+- 等待首个 IDR 起播时，host 不能把 IDR 前的所有 H.264 access unit 都丢掉；如果前置 access unit 里包含 SPS/PPS，必须缓存并在首个 IDR 前写给 ffplay，否则 `live-preview.log` 会出现 `non-existing PPS`，ffplay 会持续黑屏。
 - `--max-frames <n>` 达到后，host 会调用 `ScrcpyService/onEnd`；如果 stop 失败，错误应包含 `route=uitest`、`grpc-stop`、`/ScrcpyService/onEnd`、payload 和 codec。
-- gRPC/协议失败时，错误应包含 `grpc-connect`、`grpc-start`、`grpc-status`、`grpc-stream` 或 generated message conversion 等阶段，以及 `/ScrcpyService/onStart`、`127.0.0.1:27182` 和 `max_receive_message_bytes=10485760`。
+- Ctrl+C/SIGINT 也走 graceful shutdown：host 退出 capture loop，调用 `ScrcpyService/onEnd`，并清理 stale `xdevice_scrcpy` 与当前动态 `tcp:<port> -> localabstract:scrcpy_grpc_socket` 或 `tcp:<port> -> tcp:5001` fport。
+- scrcpy flavor 的 `uitest start-daemon` 返回后，host 会先轮询 `/proc/net/unix`，确认设备侧 `scrcpy_grpc_socket` 已创建，再执行 `hdc fport` 和 gRPC connect；recorder flavor 会按 official TCP / Unix socket 两种形态先转发，再启动 recorder daemon。
+- gRPC/协议失败时，错误应包含 `local-port-selection`、`grpc-socket-ready`、`grpc-connect`、`grpc-start`、`grpc-status`、`grpc-stream` 或 generated message conversion 等阶段，以及 `/ScrcpyService/onStart`、动态 `127.0.0.1:<port>`、`max_receive_message_bytes=10485760` 和 `uitest_runtime_diagnostics`。
 - 只有 ffplay 显示真实设备画面，且 `<session-dir>/events.log` 有 H.264 frame/diag 记录时，才算 real-device `--route uitest` H.264 E2E 成功。
 
 ### 设备现场检查
@@ -376,7 +401,7 @@ uitest start-daemon singleness \
   -scale 1 \
   -frameRate 120 \
   -bitRate 31457280 \
-  -p 9958 \
+  -p 5001 \
   -screenId 0 \
   -encodeType 0 \
   -iFrameInterval 2000 \
@@ -388,7 +413,7 @@ uitest start-daemon singleness \
 - `frameRate=120`
 - `bitRate=31457280`，即 `30 Mbps`
 - `iFrameInterval=2000`
-- `repeatInterval=33`
+- `repeatInterval=33` 对齐 HoKit 现场观测到的 official payload 参数；它对应平台编码器 `video_encoder_repeat_previous_frame_after`，不能简单按 `1000 / 120` 推导为 `8`
 
 ### 生命周期
 
@@ -439,7 +464,7 @@ uitest start-daemon singleness \
 2. `uitest extension` 最小验证路线
    - 先验证自定义 so 是否可加载、可运行、可持有 socket
 3. 官方 `hosScrcpy` 参考路线
-   - 参考虚拟屏、参数、gRPC、IDR 请求和会话模型
+   - 参考虚拟屏、参数、gRPC、wakeup 和会话模型
 
 当前最稳妥的推进顺序：
 

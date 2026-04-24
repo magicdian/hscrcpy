@@ -334,6 +334,7 @@ struct VideoTransportState {
     std::string selected_video_codec;
     ChannelBinding binding;
     DisplayInfo display;
+    VideoConfig config;
     std::string selected_path_module;
     std::vector<std::string> pipeline_stages;
     bool active;

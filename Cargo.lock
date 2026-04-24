@@ -261,6 +261,7 @@ version = "0.1.0"
 dependencies = [
  "hscrcpy-contracts",
  "hscrcpy-host",
+ "libc",
 ]
 
 [[package]]

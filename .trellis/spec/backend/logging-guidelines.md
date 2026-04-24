@@ -14,11 +14,15 @@ As native code and a desktop host are added, logging should stay structured and 
 
 ## Log Levels
 
+Host Rust logs use `crates/hscrcpy-host/src/host_log.rs` for structured stdout logs. The current development default is `debug`; set `HSCRCPY_LOG=trace|debug|info|warn|error|off` to control verbosity.
+
+* `trace`: exact command shapes and highly detailed retry internals useful during bringup
+* `debug`: retry attempts, selected payload names, forward specs, and other development diagnostics
 * `info`: lifecycle milestones, companion startup, capability negotiation, session start/stop
 * `warn`: recoverable fallback, degraded codec path, retryable transport issues
 * `error`: startup failure, incompatible versions, unrecoverable API errors, bridge failures
 
-Do not spam frame-by-frame success logs in hot paths.
+Do not spam frame-by-frame success logs in hot paths. During official `uitest` bringup, logging each lifecycle retry is acceptable because it is startup-path evidence, not steady-state media logging.
 
 ---
 
@@ -31,6 +35,12 @@ Include these fields whenever practical:
 * device identifier or target alias
 * selected codec or fallback mode
 * error code or API name when a failure occurs
+
+Host Rust log line shape:
+
+```text
+log level=<level> subsystem=<subsystem> operation=<operation> key=value ...
+```
 
 Use public-safe formatting in ArkTS logs.
 
@@ -135,3 +145,44 @@ This applies whenever a change affects steady-state media timing, queue depth, p
 
 * Native logs use `hscrcpyDiag` with `subsystem` and `operation`, interval summaries, and anomaly-specific fields.
 * Host timing summaries are printed to stdout and appended to `<session_dir>/events.log` for post-run analysis.
+
+## Scenario: Stream Latency and FPS Regression Triage
+
+### 1. Scope / Trigger
+
+Use this checklist when investigating slow startup, visible stream delay, frame cadence below the target, or uncertainty about whether ffplay or project code is causing latency.
+
+### 2. Contracts
+
+* The default H.264 live path must avoid diagnostic disk writes in the per-frame hot path.
+* `.h264` frame files and `stream.h264` are opt-in diagnostics and must require an explicit host flag.
+* A 120 Hz target means host requests, route launch arguments, route capability metadata, and device encoder configuration must all carry `max_fps=120` or a measured lower device capability.
+* Official `uitest` launch parameters must keep HoKit-verified values unless real-device diagnostics prove otherwise; in particular `-frameRate 120` is compatible with `-repeatInterval 33`, because repeat interval maps to encoder repeat-previous-frame behavior rather than the nominal stream FPS.
+* ffplay raw H.264 preview must set the input `-framerate` to the selected stream FPS; the raw H.264 demuxer default is not a valid latency/fps assumption.
+* When ffplay writes are fast but the window stays blank, inspect `<session_dir>/live-preview.log` before blaming transport. `non-existing PPS` means the preview path dropped SPS/PPS decoder config before the first IDR.
+* Do not blame ffplay until `ffplay_write_*` diagnostics show slow writes or backpressure while device/host cadence remains healthy.
+
+### 3. Required Evidence
+
+| Layer | Evidence | Interpretation |
+|-------|----------|----------------|
+| Device encoder callback | `pts_step_avg_us`, `callback_step_avg_us`, `dropped_units`, `queue_depth_max` | Proves whether capture/encode cadence is already slow before transport |
+| Device transport send | `send_duration_avg_us`, `send_duration_max_us`, `timeline_lag_max_us`, `backpressure` | Proves whether socket/HDC writes are blocking |
+| Host ingress/render | `ingress_wait_avg_us`, `host_rx_span_us`, `host_present_span_us`, `present_avg_us` | Proves whether host code is adding delay before preview |
+| ffplay pipe | `ffplay_write_avg_us`, `ffplay_write_max_us`, `ffplay_slow_writes` | Proves whether ffplay stdin is exerting backpressure |
+
+### 4. Wrong vs Correct
+
+#### Wrong
+
+* Running a latency test while recording every H.264 access unit to disk by default.
+* Feeding raw H.264 to ffplay without `-framerate <selected_fps>`.
+* Waiting for the first H.264 IDR by dropping all earlier access units, including SPS/PPS decoder config.
+* Inferring "ffplay is slow" only from visible delay without checking `ffplay_write_*` metrics.
+* Setting `--fps 120` on the host while route launch args or device encoder configuration still clamp to 30/60 fps.
+
+#### Correct
+
+* Run the default live-preview path without H.264 disk recording first.
+* Add `--record-h264` only for stream artifact capture, and treat the result as a diagnostic run with extra I/O.
+* Compare all four timing layers before assigning root cause.

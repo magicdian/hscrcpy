@@ -140,9 +140,8 @@ impl PreparedVideoIngress {
     /// Converts one official scrcpy stream message into renderer-facing ingress.
     ///
     /// The current official adapter facade exposes encoded bytes and codec only.
-    /// It does not expose source timestamps or keyframe flags, so callers must
-    /// provide a deterministic synthesized PTS and this conversion marks H.264
-    /// units as non-keyframes.
+    /// It does not expose source timestamps, so callers must provide a
+    /// deterministic synthesized PTS. Keyframe status is inferred from IDR NALs.
     pub fn from_official_scrcpy_message(
         message: OfficialScrcpyVideoMessage,
         synthesized_pts_us: u64,
@@ -153,11 +152,18 @@ impl PreparedVideoIngress {
                 message.codec, message.reply_type, message.payload_key
             )));
         }
+        if message.payload.is_empty() {
+            return Err(HostError::ContractViolation(
+                "h264 access unit payload must not be empty".to_string(),
+            ));
+        }
+
+        let is_keyframe = h264::access_unit_has_idr(&message.payload)?;
 
         Self::from_packet(VideoTransportPacket::new(
             VideoCodec::H264,
             synthesized_pts_us,
-            false,
+            is_keyframe,
             message.payload,
         ))
     }
@@ -263,7 +269,7 @@ mod tests {
         match ingress {
             PreparedVideoIngress::H264(access_unit) => {
                 assert_eq!(access_unit.timestamp_micros, 1_000);
-                assert!(!access_unit.is_keyframe);
+                assert!(access_unit.is_keyframe);
                 assert_eq!(access_unit.encoded_bytes, payload);
             }
             unexpected => panic!("unexpected ingress: {unexpected:?}"),

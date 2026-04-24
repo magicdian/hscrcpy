@@ -208,6 +208,7 @@ export interface VideoTransportState {
   selectedVideoCodec: VideoCodec;
   binding: ChannelBinding;
   display: DisplayInfo;
+  config: VideoConfig;
   selectedPathModule: string;
   pipelineStages: string[];
   active: boolean;

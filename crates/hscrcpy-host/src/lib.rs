@@ -3,6 +3,7 @@ pub mod companion;
 pub mod control;
 mod error;
 pub mod hdc;
+pub mod host_log;
 pub mod official_scrcpy;
 pub mod render;
 pub mod route;

@@ -271,7 +271,11 @@ bool ScreenCaptureSource::Start(const core::VideoTransportState &state, std::str
     (void)OH_AVFormat_SetIntValue(encoder_format, OH_MD_KEY_PIXEL_FORMAT, AV_PIXEL_FORMAT_SURFACE_FORMAT);
     (void)OH_AVFormat_SetIntValue(encoder_format, OH_MD_KEY_VIDEO_ENCODE_BITRATE_MODE, BITRATE_MODE_VBR);
     (void)OH_AVFormat_SetLongValue(encoder_format, OH_MD_KEY_BITRATE, configuration.bitrate);
-    (void)OH_AVFormat_SetIntValue(encoder_format, OH_MD_KEY_I_FRAME_INTERVAL, kDefaultIFrameIntervalMs);
+    const int32_t iframe_interval_ms =
+        state.config.has_iframe_interval_ms && state.config.iframe_interval_ms > 0 ?
+            state.config.iframe_interval_ms :
+            kDefaultIFrameIntervalMs;
+    (void)OH_AVFormat_SetIntValue(encoder_format, OH_MD_KEY_I_FRAME_INTERVAL, iframe_interval_ms);
 
     const OH_AVErrCode configure_result = OH_VideoEncoder_Configure(encoder_, encoder_format);
     OH_AVFormat_Destroy(encoder_format);

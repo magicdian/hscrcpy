@@ -708,6 +708,7 @@ core::VideoUnitPreview BuildVideoUnitPreview(const std::string &codec)
 core::VideoTransportState BuildVideoTransportState(
     const core::SessionTransportState &session_state,
     const core::SessionReadyPreview &session_ready,
+    const core::SessionConfigRequest &request,
     const std::vector<std::string> &pipeline_stages)
 {
     return {
@@ -715,6 +716,15 @@ core::VideoTransportState BuildVideoTransportState(
         session_ready.selected_video_codec,
         session_ready.channel_layout.video,
         session_ready.display,
+        {
+            request.video_max_width,
+            request.video_max_height,
+            request.video_max_fps,
+            request.has_video_bitrate_kbps,
+            request.video_bitrate_kbps,
+            request.has_video_iframe_interval_ms,
+            request.video_iframe_interval_ms
+        },
         session_ready.selected_video_codec == core::kVideoCodecH264 ? "video/h264_video_path" : "video/jpeg_video_path",
         pipeline_stages,
         false

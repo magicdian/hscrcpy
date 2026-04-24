@@ -8,7 +8,7 @@ namespace h264 {
 
 namespace {
 
-static constexpr int kH264MaxFps = 60;
+static constexpr int kH264MaxFps = 120;
 
 }  // namespace
 

@@ -591,6 +591,7 @@ napi_value CreateVideoTransportStateValue(napi_env env, const core::VideoTranspo
         !SetNamedProperty(env, result, "selectedVideoCodec", CreateString(env, state.selected_video_codec)) ||
         !SetNamedProperty(env, result, "binding", CreateChannelBindingValue(env, state.binding)) ||
         !SetNamedProperty(env, result, "display", CreateDisplayInfoValue(env, state.display)) ||
+        !SetNamedProperty(env, result, "config", CreateVideoConfigValue(env, state.config)) ||
         !SetNamedProperty(env, result, "selectedPathModule", CreateString(env, state.selected_path_module)) ||
         !SetNamedProperty(env, result, "pipelineStages", CreateStringArray(env, state.pipeline_stages)) ||
         !SetNamedProperty(env, result, "active", CreateBoolean(env, state.active))) {
@@ -1021,21 +1022,35 @@ bool ReadSessionTransportState(napi_env env, napi_value value, core::SessionTran
         ReadChannelLayout(env, channel_layout, &state->channel_layout);
 }
 
+bool ReadVideoConfig(napi_env env, napi_value value, core::VideoConfig *config)
+{
+    return GetRequiredInt32Property(env, value, "maxWidth", &config->max_width) &&
+        GetRequiredInt32Property(env, value, "maxHeight", &config->max_height) &&
+        GetRequiredInt32Property(env, value, "maxFps", &config->max_fps) &&
+        GetOptionalInt32Property(env, value, "bitrateKbps", &config->bitrate_kbps, &config->has_bitrate_kbps) &&
+        GetOptionalInt32Property(
+            env, value, "iframeIntervalMs", &config->iframe_interval_ms, &config->has_iframe_interval_ms);
+}
+
 bool ReadVideoTransportState(napi_env env, napi_value value, core::VideoTransportState *state)
 {
     napi_value binding = nullptr;
     napi_value display = nullptr;
+    napi_value config = nullptr;
     if (!GetRequiredStringProperty(env, value, "sessionId", &state->session_id) ||
         !GetRequiredStringProperty(env, value, "selectedVideoCodec", &state->selected_video_codec) ||
         !GetRequiredObjectProperty(env, value, "binding", &binding) ||
         !GetRequiredObjectProperty(env, value, "display", &display) ||
+        !GetRequiredObjectProperty(env, value, "config", &config) ||
         !GetRequiredStringProperty(env, value, "selectedPathModule", &state->selected_path_module) ||
         !GetRequiredStringArrayProperty(env, value, "pipelineStages", &state->pipeline_stages) ||
         !GetRequiredBoolProperty(env, value, "active", &state->active)) {
         return false;
     }
 
-    return ReadChannelBinding(env, binding, &state->binding) && ReadDisplayInfo(env, display, &state->display);
+    return ReadChannelBinding(env, binding, &state->binding) &&
+        ReadDisplayInfo(env, display, &state->display) &&
+        ReadVideoConfig(env, config, &state->config);
 }
 
 bool ReadConfigureSessionTransportArgs(

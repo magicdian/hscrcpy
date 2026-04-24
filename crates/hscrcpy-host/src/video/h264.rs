@@ -46,6 +46,71 @@ impl H264VideoPath {
     }
 }
 
+pub fn access_unit_has_idr(payload: &[u8]) -> HostResult<bool> {
+    inspect_annex_b_access_unit(payload).map(|inspection| inspection.has_idr_nal)
+}
+
+pub fn decoder_config_bytes(payload: &[u8]) -> HostResult<Vec<u8>> {
+    let Some((first_start_code, _)) = find_annex_b_start_code(payload, 0) else {
+        return Err(HostError::ContractViolation(
+            "h264 payload must use Annex-B start codes".to_string(),
+        ));
+    };
+    if payload[..first_start_code].iter().any(|byte| *byte != 0) {
+        return Err(HostError::ContractViolation(format!(
+            "h264 payload contains non-zero prefix before first Annex-B start code at offset {first_start_code}"
+        )));
+    }
+
+    let mut cursor = first_start_code;
+    let mut config = Vec::new();
+    let mut nal_count = 0;
+    while let Some((start_code_offset, start_code_len)) = find_annex_b_start_code(payload, cursor) {
+        let nal_header_offset = start_code_offset + start_code_len;
+        if nal_header_offset >= payload.len() {
+            return Err(HostError::ContractViolation(format!(
+                "h264 Annex-B start code at offset {start_code_offset} is missing a NAL header"
+            )));
+        }
+
+        let next_start_code_offset = find_annex_b_start_code(payload, nal_header_offset)
+            .map(|(offset, _)| offset)
+            .unwrap_or(payload.len());
+        if next_start_code_offset <= nal_header_offset {
+            return Err(HostError::ContractViolation(format!(
+                "h264 NAL unit at offset {start_code_offset} has empty payload"
+            )));
+        }
+
+        let nal_header = payload[nal_header_offset];
+        if nal_header & 0x80 != 0 {
+            return Err(HostError::ContractViolation(format!(
+                "h264 NAL header at offset {nal_header_offset} has forbidden_zero_bit set"
+            )));
+        }
+
+        let nal_type = nal_header & 0x1f;
+        if nal_type == 0 {
+            return Err(HostError::ContractViolation(format!(
+                "h264 NAL header at offset {nal_header_offset} has invalid type 0"
+            )));
+        }
+        if matches!(nal_type, 7 | 8) {
+            config.extend_from_slice(&payload[start_code_offset..next_start_code_offset]);
+        }
+        nal_count += 1;
+        cursor = next_start_code_offset;
+    }
+
+    if nal_count == 0 {
+        return Err(HostError::ContractViolation(
+            "h264 payload did not contain any NAL units".to_string(),
+        ));
+    }
+
+    Ok(config)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct H264Inspection {
     has_idr_nal: bool,
@@ -262,5 +327,18 @@ mod tests {
         assert_eq!(unit.timestamp_micros, 345);
         assert!(unit.is_keyframe);
         assert_eq!(unit.encoded_bytes, payload.to_vec());
+    }
+
+    #[test]
+    fn extracts_decoder_config_nals_before_live_preview_start() {
+        let payload = [
+            0, 0, 0, 1, 0x09, 0xf0, 0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1f, 0, 0, 1, 0x68, 0xce, 0x06,
+            0xe2, 0, 0, 1, 0x41, 0x9a, 0x20,
+        ];
+
+        assert_eq!(
+            super::decoder_config_bytes(&payload).expect("config extraction should pass"),
+            vec![0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1f, 0, 0, 1, 0x68, 0xce, 0x06, 0xe2]
+        );
     }
 }

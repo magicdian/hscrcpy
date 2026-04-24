@@ -14,3 +14,4 @@ authors = ["hscrcpy contributors"]
 [workspace.dependencies]
 hscrcpy-contracts = { path = "crates/hscrcpy-contracts" }
 hscrcpy-host = { path = "crates/hscrcpy-host" }
+libc = "0.2.185"

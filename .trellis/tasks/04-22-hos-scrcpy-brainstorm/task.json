@@ -48,6 +48,6 @@
   "children": [],
   "parent": null,
   "relatedFiles": [],
-  "notes": "",
+  "notes": "2026-04-24: uitest scrcpy route is usable for live H.264 preview, but official Huawei hosScrcpy also shows delayed/no first decodable frame on static screens. Official recorder mode failed on the current device/package combination. Do not keep spending time on recorder as the fallback; prioritize the controlled HAP route and explicit startup/IDR behavior.",
   "meta": {}
 }

@@ -8,11 +8,13 @@ use hscrcpy_contracts::{
     SessionMessage, SessionReady, StopSession, VideoCodec, VideoCodecDescriptor,
 };
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::str::FromStr;
+use std::time::Duration;
 
 const VIDEO_PACKET_HEADER_LEN: usize = 14;
+const VIDEO_RECEIVE_POLL_TIMEOUT: Duration = Duration::from_millis(100);
 
 pub trait SessionChannelTransport {
     fn send_message(&mut self, message: &SessionMessage) -> HostResult<()>;
@@ -196,9 +198,7 @@ impl TcpVideoChannel {
 impl VideoChannelTransport for TcpVideoChannel {
     fn receive_video_ingress(&mut self) -> HostResult<PreparedVideoIngress> {
         let mut header = [0_u8; VIDEO_PACKET_HEADER_LEN];
-        self.stream.read_exact(&mut header).map_err(|error| {
-            HostError::TransportFailure(format!("failed to read video packet header: {error}"))
-        })?;
+        read_exact_polling(&mut self.stream, &mut header, "video packet header")?;
 
         let codec = decode_video_codec(header[0])?;
         if codec != self.selected_codec {
@@ -226,9 +226,7 @@ impl VideoChannelTransport for TcpVideoChannel {
         }
 
         let mut payload = vec![0_u8; payload_length as usize];
-        self.stream.read_exact(&mut payload).map_err(|error| {
-            HostError::TransportFailure(format!("failed to read video packet payload: {error}"))
-        })?;
+        read_exact_polling(&mut self.stream, &mut payload, "video packet payload")?;
 
         PreparedVideoIngress::from_packet(VideoTransportPacket::new(
             codec,
@@ -237,6 +235,48 @@ impl VideoChannelTransport for TcpVideoChannel {
             payload,
         ))
     }
+}
+
+fn read_exact_polling(stream: &mut TcpStream, buf: &mut [u8], context: &str) -> HostResult<()> {
+    stream
+        .set_read_timeout(Some(VIDEO_RECEIVE_POLL_TIMEOUT))
+        .map_err(|error| {
+            HostError::TransportFailure(format!("failed to set video read timeout: {error}"))
+        })?;
+
+    let mut read_len = 0usize;
+    while read_len < buf.len() {
+        match stream.read(&mut buf[read_len..]) {
+            Ok(0) => {
+                return Err(HostError::TransportFailure(format!(
+                    "failed to read {context}: unexpected EOF"
+                )));
+            }
+            Ok(bytes_read) => {
+                read_len += bytes_read;
+            }
+            Err(error)
+                if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
+                    && read_len == 0 =>
+            {
+                return Err(HostError::ReceiveTimeout(format!(
+                    "no {context} received within {}ms",
+                    VIDEO_RECEIVE_POLL_TIMEOUT.as_millis()
+                )));
+            }
+            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                return Err(HostError::TransportFailure(format!(
+                    "timed out after partially reading {context}"
+                )));
+            }
+            Err(error) => {
+                return Err(HostError::TransportFailure(format!(
+                    "failed to read {context}: {error}"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn encode_session_message(message: &SessionMessage) -> String {

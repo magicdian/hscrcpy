@@ -1,9 +1,12 @@
 use crate::companion::{CompanionAction, CompanionLaunchRequest, CompanionManager, CompanionPlan};
 use crate::hdc::{HdcBridge, HdcForwardSpec};
+use crate::host_log;
 use crate::{HostError, HostResult};
 use hscrcpy_contracts::TransportKind;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 
 const ROUTE: &str = "uitest";
 const PHASE_PAYLOAD_SELECTION: &str = "payload-selection";
@@ -11,22 +14,80 @@ const PHASE_STALE_SCAN: &str = "stale-process-scan";
 const PHASE_STALE_KILL: &str = "stale-process-kill";
 const PHASE_PAYLOAD_PUSH: &str = "payload-push";
 const PHASE_LAUNCH: &str = "launch";
+const PHASE_GRPC_SOCKET_READY: &str = "grpc-socket-ready";
 const PHASE_FORWARD: &str = "forward";
 const PHASE_CLEANUP: &str = "cleanup";
 
 pub const UITEST_REMOTE_PAYLOAD_PATH: &str = "/data/local/tmp/scrcpy_server.so";
+pub const UITEST_RECORDER_REMOTE_PAYLOAD_PATH: &str = "/data/local/tmp/libscreen_recorder.z.so";
 pub const UITEST_GRPC_SOCKET_NAME: &str = "scrcpy_grpc_socket";
+pub const UITEST_RECORDER_GRPC_SOCKET_NAME: &str = "screen_record_grpc_socket";
 
-const DEFAULT_LOCAL_GRPC_PORT: u16 = 27_182;
-const DEFAULT_FRAME_RATE: u16 = 60;
+const DEFAULT_LOCAL_GRPC_PORT: u16 = 27_184;
+const DEFAULT_FRAME_RATE: u16 = 120;
 const DEFAULT_BIT_RATE: u32 = 31_457_280;
 const DEFAULT_SCREEN_ID: u16 = 0;
 const DEFAULT_IFRAME_INTERVAL_MS: u32 = 2_000;
 const DEFAULT_REPEAT_INTERVAL_MS: u16 = 33;
 const DEFAULT_RECORD_PORT_ARG: u16 = 9_958;
+const RECORDER_GRPC_REMOTE_PORT: u16 = 5_001;
+#[cfg(not(test))]
+const STALE_PROCESS_WAIT_ATTEMPTS: usize = 10;
+#[cfg(test)]
+const STALE_PROCESS_WAIT_ATTEMPTS: usize = 3;
+#[cfg(not(test))]
+const STALE_PROCESS_WAIT_INTERVAL_MS: u64 = 100;
+#[cfg(test)]
+const STALE_PROCESS_WAIT_INTERVAL_MS: u64 = 0;
+#[cfg(not(test))]
+const GRPC_SOCKET_WAIT_ATTEMPTS: usize = 100;
+#[cfg(test)]
+const GRPC_SOCKET_WAIT_ATTEMPTS: usize = 3;
+#[cfg(not(test))]
+const GRPC_SOCKET_WAIT_INTERVAL_MS: u64 = 100;
+#[cfg(test)]
+const GRPC_SOCKET_WAIT_INTERVAL_MS: u64 = 0;
+#[cfg(not(test))]
+const RECORDER_PROCESS_WAIT_ATTEMPTS: usize = 10;
+#[cfg(test)]
+const RECORDER_PROCESS_WAIT_ATTEMPTS: usize = 3;
+#[cfg(not(test))]
+const RECORDER_PROCESS_WAIT_INTERVAL_MS: u64 = 100;
+#[cfg(test)]
+const RECORDER_PROCESS_WAIT_INTERVAL_MS: u64 = 0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UitestLaunchFlavor {
+    Scrcpy,
+    Recorder,
+}
+
+impl UitestLaunchFlavor {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Scrcpy => "scrcpy",
+            Self::Recorder => "recorder",
+        }
+    }
+}
+
+impl std::str::FromStr for UitestLaunchFlavor {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw {
+            "scrcpy" => Ok(Self::Scrcpy),
+            "recorder" => Ok(Self::Recorder),
+            other => Err(format!(
+                "unsupported uitest flavor `{other}`; expected `scrcpy` or `recorder`"
+            )),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UitestLaunchConfig {
+    pub flavor: UitestLaunchFlavor,
     pub payload_override: Option<PathBuf>,
     pub archive_root: PathBuf,
     pub remote_payload_path: String,
@@ -41,11 +102,27 @@ impl UitestLaunchConfig {
             ..Self::default()
         }
     }
+
+    pub fn for_flavor(flavor: UitestLaunchFlavor) -> Self {
+        match flavor {
+            UitestLaunchFlavor::Scrcpy => Self::default(),
+            UitestLaunchFlavor::Recorder => Self {
+                flavor,
+                payload_override: None,
+                archive_root: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../third_party/hypium/xdevice-devicetest/6.1.0.210/recorder"),
+                remote_payload_path: UITEST_RECORDER_REMOTE_PAYLOAD_PATH.to_string(),
+                grpc_socket_name: String::new(),
+                local_grpc_port: DEFAULT_LOCAL_GRPC_PORT,
+            },
+        }
+    }
 }
 
 impl Default for UitestLaunchConfig {
     fn default() -> Self {
         Self {
+            flavor: UitestLaunchFlavor::Scrcpy,
             payload_override: None,
             archive_root: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../third_party/hypium/hosScrcpy/6.1.0.210/libscrcpy"),
@@ -99,77 +176,216 @@ where
             )));
         }
 
-        let payload = select_official_payload(&self.config)?;
+        let payloads = select_official_payload_candidates(&self.config)?;
         let local_grpc_port =
             resolve_local_grpc_port(request).unwrap_or(self.config.local_grpc_port);
+        let grpc_forward_specs = grpc_forward_specs_for_config(&self.config, local_grpc_port);
+        let legacy_grpc_forward_specs =
+            grpc_forward_specs_for_config(&self.config, self.config.local_grpc_port);
 
-        let stale = scan_stale_processes(&self.hdc, device_id)?;
-        if !stale.is_empty() {
-            kill_stale_processes(&self.hdc, device_id, &stale)?;
-            let remaining = scan_stale_processes(&self.hdc, device_id)?;
-            if !remaining.is_empty() {
-                return Err(lifecycle_error(
-                    PHASE_STALE_KILL,
-                    "xdevice_scrcpy",
-                    format!(
-                        "stale route-owned process(es) remained alive after kill: {}",
-                        format_processes(&remaining)
-                    ),
-                ));
+        cleanup_stale_processes(&self.hdc, device_id)?;
+        for spec in &grpc_forward_specs {
+            let _ = self.hdc.remove_forward(device_id, spec);
+        }
+        if local_grpc_port != self.config.local_grpc_port {
+            for spec in &legacy_grpc_forward_specs {
+                let _ = self.hdc.remove_forward(device_id, spec);
             }
         }
 
-        if let Err(error) =
-            self.hdc
-                .push_file(device_id, &payload, &self.config.remote_payload_path)
-        {
-            let cleanup = cleanup_payload(&self.hdc, device_id, &self.config);
-            return Err(cleanup.err().unwrap_or_else(|| {
-                lifecycle_error(
-                    PHASE_PAYLOAD_PUSH,
-                    &self.config.remote_payload_path,
-                    error.to_string(),
-                )
-            }));
-        }
-
-        let launch_result = self
-            .hdc
-            .exec_shell(device_id, &launch_command(&self.config))
-            .map_err(|error| {
-                lifecycle_error(PHASE_LAUNCH, "uitest start-daemon", error.to_string())
-            })
-            .and_then(|_| {
-                self.hdc
-                    .forward(
-                        device_id,
-                        &HdcForwardSpec::tcp_to_localabstract(
-                            local_grpc_port,
-                            self.config.grpc_socket_name.clone(),
+        let mut last_error = None;
+        for payload in payloads {
+            let payload_name = payload_file_name(&payload).to_string();
+            for grpc_forward_spec in &grpc_forward_specs {
+                if self.config.flavor == UitestLaunchFlavor::Recorder {
+                    host_log::debug(
+                        "uitest",
+                        "recorder_launch_attempt",
+                        format!(
+                            "device={} payload={} forward={}",
+                            device_id,
+                            payload_name,
+                            forward_spec_label(grpc_forward_spec)
                         ),
-                    )
-                    .map_err(|error| {
-                        lifecycle_error(
-                            PHASE_FORWARD,
-                            &format!("localabstract:{}", self.config.grpc_socket_name),
-                            error.to_string(),
-                        )
-                    })
-            });
-
-        let cleanup_result = cleanup_payload(&self.hdc, device_id, &self.config);
-        match (launch_result, cleanup_result) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(_), Err(cleanup_error)) => Err(cleanup_error),
-            (Err(error), Ok(())) => Err(error),
-            (Ok(()), Err(cleanup_error)) => Err(cleanup_error),
+                    );
+                }
+                match launch_payload_candidate(
+                    &self.hdc,
+                    device_id,
+                    &self.config,
+                    &payload,
+                    grpc_forward_spec,
+                ) {
+                    Ok(()) => return Ok(()),
+                    Err(error) => {
+                        if self.config.flavor == UitestLaunchFlavor::Recorder {
+                            host_log::warn(
+                                "uitest",
+                                "recorder_launch_attempt_failed",
+                                format!(
+                                    "device={} payload={} forward={} error={}",
+                                    device_id,
+                                    payload_name,
+                                    forward_spec_label(grpc_forward_spec),
+                                    error
+                                ),
+                            );
+                        }
+                        last_error = Some(error);
+                        let _ = cleanup_stale_processes(&self.hdc, device_id);
+                        let _ = self.hdc.remove_forward(device_id, grpc_forward_spec);
+                    }
+                }
+            }
         }
+        Err(last_error.unwrap_or_else(|| {
+            payload_selection_error(
+                &self.config.archive_root,
+                "no official libscrcpy_server payload was tried".to_string(),
+            )
+        }))
     }
 }
 
+fn launch_payload_candidate<H: HdcBridge>(
+    hdc: &H,
+    device_id: &str,
+    config: &UitestLaunchConfig,
+    payload: &Path,
+    grpc_forward_spec: &HdcForwardSpec,
+) -> HostResult<()> {
+    if let Err(error) = hdc.push_file(device_id, payload, &config.remote_payload_path) {
+        let cleanup = cleanup_payload(hdc, device_id, config);
+        return Err(cleanup.err().unwrap_or_else(|| {
+            lifecycle_error(
+                PHASE_PAYLOAD_PUSH,
+                &config.remote_payload_path,
+                error.to_string(),
+            )
+        }));
+    }
+
+    let mut grpc_forwarded = false;
+    let pre_launch_forward_result = if config.flavor == UitestLaunchFlavor::Recorder {
+        grpc_forwarded = true;
+        hdc.forward(device_id, grpc_forward_spec).map_err(|error| {
+            lifecycle_error(
+                PHASE_FORWARD,
+                forward_target_label(grpc_forward_spec),
+                error.to_string(),
+            )
+        })
+    } else {
+        Ok(())
+    };
+
+    let launch_result = pre_launch_forward_result
+        .and_then(|_| {
+            host_log::trace(
+                "uitest",
+                "launch_command",
+                format!(
+                    "device={} payload={} command={}",
+                    device_id,
+                    payload_file_name(payload),
+                    launch_command(config)
+                ),
+            );
+            hdc.exec_shell(device_id, &launch_command(config))
+                .map_err(|error| {
+                    lifecycle_error(PHASE_LAUNCH, "uitest start-daemon", error.to_string())
+                })
+        })
+        .and_then(|_| wait_for_grpc_endpoint(hdc, device_id, config, grpc_forward_spec))
+        .and_then(|_| {
+            if grpc_forwarded {
+                Ok(())
+            } else {
+                hdc.forward(device_id, grpc_forward_spec).map_err(|error| {
+                    lifecycle_error(
+                        PHASE_FORWARD,
+                        forward_target_label(grpc_forward_spec),
+                        error.to_string(),
+                    )
+                })
+            }
+        });
+
+    let cleanup_result = cleanup_payload(hdc, device_id, config);
+    match (launch_result, cleanup_result) {
+        (Ok(()), Ok(())) => {
+            if config.flavor == UitestLaunchFlavor::Recorder {
+                host_log::info(
+                    "uitest",
+                    "recorder_launch_ready",
+                    format!(
+                        "device={} payload={} forward={} status=ready",
+                        device_id,
+                        payload_file_name(payload),
+                        forward_spec_label(grpc_forward_spec)
+                    ),
+                );
+            }
+            Ok(())
+        }
+        (Err(_), Err(cleanup_error)) => Err(cleanup_error),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(cleanup_error)) => Err(cleanup_error),
+    }
+}
+
+pub fn cleanup_uitest_runtime<H: HdcBridge>(
+    hdc: &H,
+    device_id: &str,
+    local_grpc_port: u16,
+    grpc_socket_name: &str,
+) -> HostResult<()> {
+    let stale_result = cleanup_stale_processes(hdc, device_id);
+    let forward_spec =
+        HdcForwardSpec::tcp_to_localabstract(local_grpc_port, grpc_socket_name.to_string());
+    let _ = hdc.remove_forward(device_id, &forward_spec);
+    let recorder_forward_spec =
+        HdcForwardSpec::tcp_to_tcp(local_grpc_port, RECORDER_GRPC_REMOTE_PORT);
+    let _ = hdc.remove_forward(device_id, &recorder_forward_spec);
+    let recorder_socket_forward_spec =
+        HdcForwardSpec::tcp_to_localabstract(local_grpc_port, UITEST_RECORDER_GRPC_SOCKET_NAME);
+    let _ = hdc.remove_forward(device_id, &recorder_socket_forward_spec);
+    stale_result
+}
+
+pub fn collect_uitest_runtime_diagnostics<H: HdcBridge>(hdc: &H, device_id: &str) -> String {
+    let ps = diagnostic_shell(
+        hdc,
+        device_id,
+        "ps -ef | grep -E 'xdevice_scrcpy|scrcpy_server|uitest start-daemon' | grep -v grep || true",
+    );
+    let unix = diagnostic_shell(
+        hdc,
+        device_id,
+        "cat /proc/net/unix | grep -E 'scrcpy_grpc_socket|screen_record_grpc_socket|uitest_socket' || true",
+    );
+    format!(
+        "ps=[{}] unix=[{}]",
+        compact_diagnostic_output(&ps),
+        compact_diagnostic_output(&unix)
+    )
+}
+
 pub fn select_official_payload(config: &UitestLaunchConfig) -> HostResult<PathBuf> {
+    select_official_payload_candidates(config)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            payload_selection_error(
+                &config.archive_root,
+                "no official libscrcpy_server payload was found".to_string(),
+            )
+        })
+}
+
+fn select_official_payload_candidates(config: &UitestLaunchConfig) -> HostResult<Vec<PathBuf>> {
     if let Some(payload_override) = &config.payload_override {
-        return validate_payload_path(payload_override, "override");
+        return validate_payload_path(payload_override, "override").map(|payload| vec![payload]);
     }
 
     let mut unix_payloads = Vec::new();
@@ -183,21 +399,58 @@ pub fn select_official_payload(config: &UitestLaunchConfig) -> HostResult<PathBu
     unix_payloads.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
     fallback_payloads.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
 
-    unix_payloads
-        .pop()
-        .or_else(|| fallback_payloads.pop())
+    let ordered = match config.flavor {
+        UitestLaunchFlavor::Scrcpy => unix_payloads
+            .into_iter()
+            .rev()
+            .chain(fallback_payloads.into_iter().rev())
+            .collect::<Vec<_>>(),
+        UitestLaunchFlavor::Recorder => fallback_payloads.into_iter().rev().collect::<Vec<_>>(),
+    };
+    if ordered.is_empty() {
+        return Err(payload_selection_error(
+            &config.archive_root,
+            "no official libscrcpy_server payload was found".to_string(),
+        ));
+    }
+
+    ordered
+        .into_iter()
         .map(|path| {
             fs::canonicalize(&path).map_err(|error| {
                 payload_selection_error(&path, format!("unable to canonicalize payload: {error}"))
             })
         })
-        .transpose()?
-        .ok_or_else(|| {
-            payload_selection_error(
-                &config.archive_root,
-                "no official libscrcpy_server payload was found".to_string(),
-            )
+        .collect::<HostResult<Vec<_>>>()
+        .and_then(|payloads| {
+            if payloads.is_empty() {
+                Err(payload_selection_error(
+                    &config.archive_root,
+                    "no official libscrcpy_server payload was found".to_string(),
+                ))
+            } else {
+                Ok(payloads)
+            }
         })
+}
+
+fn diagnostic_shell<H: HdcBridge>(hdc: &H, device_id: &str, command: &str) -> String {
+    hdc.exec_shell(device_id, command)
+        .unwrap_or_else(|error| format!("diagnostic command `{command}` failed: {error}"))
+}
+
+fn compact_diagnostic_output(output: &str) -> String {
+    let compact = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    if compact.is_empty() {
+        "empty".to_string()
+    } else {
+        compact
+    }
 }
 
 fn collect_payload_candidates(
@@ -287,6 +540,35 @@ fn kill_stale_processes<H: HdcBridge>(
         .map_err(|error| lifecycle_error(PHASE_STALE_KILL, &pids, error.to_string()))
 }
 
+fn cleanup_stale_processes<H: HdcBridge>(hdc: &H, device_id: &str) -> HostResult<()> {
+    let stale = scan_stale_processes(hdc, device_id)?;
+    if stale.is_empty() {
+        return Ok(());
+    }
+
+    kill_stale_processes(hdc, device_id, &stale)?;
+    for attempt in 0..STALE_PROCESS_WAIT_ATTEMPTS {
+        let remaining = scan_stale_processes(hdc, device_id)?;
+        if remaining.is_empty() {
+            return Ok(());
+        }
+        if attempt + 1 < STALE_PROCESS_WAIT_ATTEMPTS {
+            thread::sleep(Duration::from_millis(STALE_PROCESS_WAIT_INTERVAL_MS));
+        } else {
+            return Err(lifecycle_error(
+                PHASE_STALE_KILL,
+                "xdevice_scrcpy",
+                format!(
+                    "stale route-owned process(es) remained alive after kill: {}",
+                    format_processes(&remaining)
+                ),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn cleanup_payload<H: HdcBridge>(
     hdc: &H,
     device_id: &str,
@@ -306,17 +588,128 @@ fn cleanup_payload<H: HdcBridge>(
     })
 }
 
+fn wait_for_grpc_endpoint<H: HdcBridge>(
+    hdc: &H,
+    device_id: &str,
+    config: &UitestLaunchConfig,
+    grpc_forward_spec: &HdcForwardSpec,
+) -> HostResult<()> {
+    match config.flavor {
+        UitestLaunchFlavor::Scrcpy => {
+            wait_for_grpc_socket(hdc, device_id, &config.grpc_socket_name)
+        }
+        UitestLaunchFlavor::Recorder => {
+            wait_for_recorder_process(hdc, device_id)?;
+            if let crate::hdc::HdcForwardEndpoint::LocalAbstract(socket_name) =
+                &grpc_forward_spec.remote
+            {
+                wait_for_grpc_socket(hdc, device_id, socket_name)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn wait_for_recorder_process<H: HdcBridge>(hdc: &H, device_id: &str) -> HostResult<()> {
+    for attempt in 1..=RECORDER_PROCESS_WAIT_ATTEMPTS {
+        let processes = scan_stale_processes(hdc, device_id)?;
+        if processes
+            .iter()
+            .any(|process| process.line.contains("libscreen_recorder.z.so"))
+        {
+            return Ok(());
+        }
+        if attempt < RECORDER_PROCESS_WAIT_ATTEMPTS {
+            thread::sleep(Duration::from_millis(RECORDER_PROCESS_WAIT_INTERVAL_MS));
+        }
+    }
+    Err(lifecycle_error(
+        PHASE_LAUNCH,
+        "libscreen_recorder.z.so",
+        format!(
+            "recorder process did not remain alive after {}ms",
+            RECORDER_PROCESS_WAIT_ATTEMPTS as u64 * RECORDER_PROCESS_WAIT_INTERVAL_MS
+        ),
+    ))
+}
+
+fn wait_for_grpc_socket<H: HdcBridge>(
+    hdc: &H,
+    device_id: &str,
+    grpc_socket_name: &str,
+) -> HostResult<()> {
+    let command = format!(
+        "cat /proc/net/unix | grep -F {} || true",
+        shell_quote(grpc_socket_name)
+    );
+    for attempt in 1..=GRPC_SOCKET_WAIT_ATTEMPTS {
+        let output = hdc.exec_shell(device_id, &command).map_err(|error| {
+            lifecycle_error(
+                PHASE_GRPC_SOCKET_READY,
+                &format!("localabstract:{grpc_socket_name}"),
+                error.to_string(),
+            )
+        })?;
+        if output.contains(grpc_socket_name) {
+            return Ok(());
+        }
+        if attempt < GRPC_SOCKET_WAIT_ATTEMPTS {
+            thread::sleep(Duration::from_millis(GRPC_SOCKET_WAIT_INTERVAL_MS));
+        }
+    }
+    Err(lifecycle_error(
+        PHASE_GRPC_SOCKET_READY,
+        &format!("localabstract:{grpc_socket_name}"),
+        format!(
+            "socket did not appear after {}ms",
+            GRPC_SOCKET_WAIT_ATTEMPTS as u64 * GRPC_SOCKET_WAIT_INTERVAL_MS
+        ),
+    ))
+}
+
+fn grpc_forward_specs_for_config(
+    config: &UitestLaunchConfig,
+    local_grpc_port: u16,
+) -> Vec<HdcForwardSpec> {
+    match config.flavor {
+        UitestLaunchFlavor::Scrcpy => vec![HdcForwardSpec::tcp_to_localabstract(
+            local_grpc_port,
+            config.grpc_socket_name.clone(),
+        )],
+        UitestLaunchFlavor::Recorder => vec![
+            HdcForwardSpec::tcp_to_tcp(local_grpc_port, RECORDER_GRPC_REMOTE_PORT),
+            HdcForwardSpec::tcp_to_localabstract(local_grpc_port, UITEST_RECORDER_GRPC_SOCKET_NAME),
+        ],
+    }
+}
+
+fn forward_target_label(spec: &HdcForwardSpec) -> String {
+    format!("{}", spec.remote)
+}
+
+fn forward_spec_label(spec: &HdcForwardSpec) -> String {
+    format!("{}->{}", spec.local, spec.remote)
+}
+
 fn launch_command(config: &UitestLaunchConfig) -> String {
-    format!(
-        "uitest start-daemon singleness --extension-name {} -scale 1 -frameRate {} -bitRate {} -p {} -screenId {} -encodeType 0 -iFrameInterval {} -repeatInterval {}",
-        remote_payload_file_name(&config.remote_payload_path),
-        DEFAULT_FRAME_RATE,
-        DEFAULT_BIT_RATE,
-        DEFAULT_RECORD_PORT_ARG,
-        DEFAULT_SCREEN_ID,
-        DEFAULT_IFRAME_INTERVAL_MS,
-        DEFAULT_REPEAT_INTERVAL_MS,
-    )
+    match config.flavor {
+        UitestLaunchFlavor::Scrcpy => format!(
+            "uitest start-daemon singleness --extension-name {} -scale 1 -frameRate {} -bitRate {} -p {} -screenId {} -encodeType 0 -iFrameInterval {} -repeatInterval {}",
+            remote_payload_file_name(&config.remote_payload_path),
+            DEFAULT_FRAME_RATE,
+            DEFAULT_BIT_RATE,
+            DEFAULT_RECORD_PORT_ARG,
+            DEFAULT_SCREEN_ID,
+            DEFAULT_IFRAME_INTERVAL_MS,
+            DEFAULT_REPEAT_INTERVAL_MS,
+        ),
+        UitestLaunchFlavor::Recorder => format!(
+            "uitest start-daemon singleness --extension-name {} -p {} -m 1 -screenId {}",
+            remote_payload_file_name(&config.remote_payload_path),
+            RECORDER_GRPC_REMOTE_PORT,
+            DEFAULT_SCREEN_ID,
+        ),
+    }
 }
 
 fn remote_payload_file_name(remote_payload_path: &str) -> &str {
@@ -324,6 +717,12 @@ fn remote_payload_file_name(remote_payload_path: &str) -> &str {
         .rsplit('/')
         .find(|part| !part.is_empty())
         .unwrap_or(remote_payload_path)
+}
+
+fn payload_file_name(path: &Path) -> &str {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("<unknown>")
 }
 
 fn resolve_local_grpc_port(request: &CompanionLaunchRequest) -> Option<u16> {
@@ -362,7 +761,7 @@ fn is_route_owned_stale_process(line: &str) -> bool {
     line.contains("xdevice_scrcpy")
         || (line.contains("uitest")
             && line.contains("start-daemon")
-            && line.contains("scrcpy_server.so"))
+            && (line.contains("scrcpy_server.so") || line.contains("libscreen_recorder.z.so")))
 }
 
 fn parse_pid(line: &str) -> Option<u32> {
@@ -406,7 +805,8 @@ fn shell_quote(value: &str) -> String {
 mod tests {
     use super::{
         parse_stale_processes, select_official_payload, UitestCompanionManager, UitestLaunchConfig,
-        UITEST_GRPC_SOCKET_NAME, UITEST_REMOTE_PAYLOAD_PATH,
+        UitestLaunchFlavor, RECORDER_GRPC_REMOTE_PORT, UITEST_GRPC_SOCKET_NAME,
+        UITEST_RECORDER_REMOTE_PAYLOAD_PATH, UITEST_REMOTE_PAYLOAD_PATH,
     };
     use crate::companion::{CompanionLaunchRequest, CompanionManager};
     use crate::hdc::{HdcBridge, HdcForwardSpec};
@@ -418,13 +818,17 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static FIXTURE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     enum HdcCall {
         Shell(String),
         Push(PathBuf, String),
         Forward(HdcForwardSpec),
+        RemoveForward(HdcForwardSpec),
     }
 
     #[derive(Default)]
@@ -480,6 +884,12 @@ mod tests {
             state.forward_result.clone().unwrap_or(Ok(()))
         }
 
+        fn remove_forward(&self, _device_id: &str, spec: &HdcForwardSpec) -> HostResult<()> {
+            let mut state = self.state.borrow_mut();
+            state.calls.push(HdcCall::RemoveForward(spec.clone()));
+            Ok(())
+        }
+
         fn forward_port(
             &self,
             _device_id: &str,
@@ -518,8 +928,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after unix epoch")
             .as_nanos();
+        let counter = FIXTURE_COUNTER.fetch_add(1, Ordering::SeqCst);
         let dir = std::env::temp_dir().join(format!(
-            "hscrcpy-uitest-fixture-{}-{nanos}",
+            "hscrcpy-uitest-fixture-{}-{nanos}-{counter}",
             std::process::id()
         ));
         fs::create_dir_all(&dir).expect("fixture dir should be created");
@@ -543,7 +954,7 @@ mod tests {
             session_id: "session-1".to_string(),
             session_channel: ChannelEndpoint {
                 transport: TransportKind::HdcForward,
-                target: "127.0.0.1:27182".to_string(),
+                target: "127.0.0.1:27184".to_string(),
             },
             video_channel: ChannelEndpoint {
                 transport: TransportKind::HdcForward,
@@ -600,14 +1011,15 @@ mod tests {
         let output = "\
 root 101 1 0 xdevice_scrcpy
 root 202 1 0 uitest start-daemon singleness --extension-name scrcpy_server.so
-root 303 1 0 uitest start-daemon singleness --extension-name uitest_agent.so
+root 303 1 0 uitest start-daemon singleness --extension-name libscreen_recorder.z.so
+root 404 1 0 uitest start-daemon singleness --extension-name uitest_agent.so
 ";
 
         let stale = parse_stale_processes(output);
 
         assert_eq!(
             stale.iter().map(|process| process.pid).collect::<Vec<_>>(),
-            vec![101, 202]
+            vec![101, 202, 303]
         );
     }
 
@@ -621,6 +1033,7 @@ root 303 1 0 uitest start-daemon singleness --extension-name uitest_agent.so
             Ok(String::new()),
             Ok(String::new()),
             Ok("uitest launched\n".to_string()),
+            Ok("@scrcpy_grpc_socket\n".to_string()),
             Ok(String::new()),
         ]);
         let manager = UitestCompanionManager::with_config(
@@ -636,25 +1049,40 @@ root 303 1 0 uitest start-daemon singleness --extension-name uitest_agent.so
         assert_eq!(calls[0], HdcCall::Shell("ps -ef".to_string()));
         assert_eq!(calls[1], HdcCall::Shell("kill -9 101".to_string()));
         assert_eq!(calls[2], HdcCall::Shell("ps -ef".to_string()));
+        assert_eq!(
+            calls[3],
+            HdcCall::RemoveForward(HdcForwardSpec::tcp_to_localabstract(
+                27184,
+                UITEST_GRPC_SOCKET_NAME
+            ))
+        );
         assert!(matches!(
-            &calls[3],
+            &calls[4],
             HdcCall::Push(_, remote) if remote == UITEST_REMOTE_PAYLOAD_PATH
         ));
         assert!(matches!(
-            &calls[4],
+            &calls[5],
             HdcCall::Shell(command)
                 if command.contains("uitest start-daemon singleness")
                     && command.contains("--extension-name scrcpy_server.so")
+                    && command.contains("-frameRate 120")
+                    && command.contains("-repeatInterval 33")
+        ));
+        assert!(matches!(
+            &calls[6],
+            HdcCall::Shell(command)
+                if command.contains("/proc/net/unix")
+                    && command.contains(UITEST_GRPC_SOCKET_NAME)
         ));
         assert_eq!(
-            calls[5],
+            calls[7],
             HdcCall::Forward(HdcForwardSpec::tcp_to_localabstract(
-                27182,
+                27184,
                 UITEST_GRPC_SOCKET_NAME
             ))
         );
         assert_eq!(
-            calls[6],
+            calls[8],
             HdcCall::Shell(format!("rm -f '{UITEST_REMOTE_PAYLOAD_PATH}'"))
         );
         fs::remove_dir_all(dir).expect("fixture dir should be removed");
@@ -669,6 +1097,8 @@ root 303 1 0 uitest start-daemon singleness --extension-name uitest_agent.so
             Ok("root 101 1 0 xdevice_scrcpy\n".to_string()),
             Ok(String::new()),
             Ok("root 101 1 0 xdevice_scrcpy\n".to_string()),
+            Ok("root 101 1 0 xdevice_scrcpy\n".to_string()),
+            Ok("root 101 1 0 xdevice_scrcpy\n".to_string()),
         ]);
         let manager = UitestCompanionManager::with_config(
             hdc.clone(),
@@ -680,7 +1110,118 @@ root 303 1 0 uitest start-daemon singleness --extension-name uitest_agent.so
             .expect_err("remaining stale process should fail launch");
 
         assert!(err.to_string().contains("stale-process-kill"));
-        assert_eq!(hdc.calls().len(), 3);
+        assert_eq!(hdc.calls().len(), 5);
+        fs::remove_dir_all(dir).expect("fixture dir should be removed");
+    }
+
+    #[test]
+    fn recorder_flavor_uses_recorder_payload_tcp_forward_and_launch_args() {
+        let dir = fixture_dir();
+        let payload = dir.join("libscrcpy_server4.z.so");
+        touch(&payload);
+        let hdc = RecordingHdc::with_shell_outputs(vec![
+            Ok(String::new()),
+            Ok("uitest launched\n".to_string()),
+            Ok("root 303 1 0 uitest start-daemon singleness --extension-name libscreen_recorder.z.so -p 5001 -m 1 -screenId 0\n".to_string()),
+            Ok(String::new()),
+        ]);
+        let mut config = UitestLaunchConfig::for_flavor(UitestLaunchFlavor::Recorder);
+        config.payload_override = Some(payload);
+        let manager = UitestCompanionManager::with_config(hdc.clone(), config);
+
+        manager
+            .launch_session("device-1", &launch_request())
+            .expect("recorder lifecycle should succeed");
+
+        let calls = hdc.calls();
+        assert!(calls.iter().any(|call| matches!(
+            call,
+            HdcCall::Push(_, remote) if remote == UITEST_RECORDER_REMOTE_PAYLOAD_PATH
+        )));
+        assert!(calls.iter().any(|call| matches!(
+            call,
+            HdcCall::RemoveForward(spec)
+                if spec == &HdcForwardSpec::tcp_to_tcp(
+                    27184,
+                    RECORDER_GRPC_REMOTE_PORT
+                )
+        )));
+        assert!(calls.iter().any(|call| matches!(
+            call,
+            HdcCall::Shell(command)
+                if command.contains("--extension-name libscreen_recorder.z.so")
+                    && command.contains("-p 5001")
+                    && command.contains("-m 1")
+                    && command.contains("-screenId 0")
+                    && !command.contains("-frameRate")
+        )));
+        assert!(calls.iter().any(|call| matches!(
+            call,
+            HdcCall::Forward(spec)
+                if spec == &HdcForwardSpec::tcp_to_tcp(
+                    27184,
+                    RECORDER_GRPC_REMOTE_PORT
+                )
+        )));
+        let forward_index = calls
+            .iter()
+            .position(|call| matches!(call, HdcCall::Forward(_)))
+            .expect("recorder should forward before launch");
+        let launch_index = calls
+            .iter()
+            .position(|call| matches!(call, HdcCall::Shell(command) if command.contains("--extension-name libscreen_recorder.z.so")))
+            .expect("recorder should launch after forward");
+        assert!(forward_index < launch_index);
+        fs::remove_dir_all(dir).expect("fixture dir should be removed");
+    }
+
+    #[test]
+    fn recorder_flavor_falls_back_when_newest_payload_exits_immediately() {
+        let dir = fixture_dir();
+        touch(&dir.join("libscrcpy_server3.z.so"));
+        touch(&dir.join("libscrcpy_server4.z.so"));
+        let hdc = RecordingHdc::with_shell_outputs(vec![
+            Ok(String::new()),
+            Ok("uitest launched\n".to_string()),
+            Ok(String::new()),
+            Ok(String::new()),
+            Ok(String::new()),
+            Ok(String::new()),
+            Ok(String::new()),
+            Ok("uitest launched\n".to_string()),
+            Ok(String::new()),
+            Ok(String::new()),
+            Ok(String::new()),
+            Ok(String::new()),
+            Ok(String::new()),
+            Ok("uitest launched\n".to_string()),
+            Ok("root 303 1 0 uitest start-daemon singleness --extension-name libscreen_recorder.z.so -p 5001 -m 1 -screenId 0\n".to_string()),
+            Ok(String::new()),
+        ]);
+        let mut config = UitestLaunchConfig::for_flavor(UitestLaunchFlavor::Recorder);
+        config.archive_root = dir.clone();
+        let manager = UitestCompanionManager::with_config(hdc.clone(), config);
+
+        manager
+            .launch_session("device-1", &launch_request())
+            .expect("recorder should try the next bundled payload");
+
+        let pushed = hdc
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                HdcCall::Push(path, _) => path.file_name().map(|name| name.to_os_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pushed,
+            vec![
+                std::ffi::OsString::from("libscrcpy_server4.z.so"),
+                std::ffi::OsString::from("libscrcpy_server4.z.so"),
+                std::ffi::OsString::from("libscrcpy_server3.z.so")
+            ]
+        );
         fs::remove_dir_all(dir).expect("fixture dir should be removed");
     }
 
@@ -693,6 +1234,7 @@ root 303 1 0 uitest start-daemon singleness --extension-name uitest_agent.so
             Ok(String::new()),
             Err(HostError::HdcFailure("launch denied".to_string())),
             Err(HostError::HdcFailure("cleanup denied".to_string())),
+            Ok(String::new()),
         ]);
         let manager = UitestCompanionManager::with_config(
             hdc.clone(),
@@ -705,9 +1247,13 @@ root 303 1 0 uitest start-daemon singleness --extension-name uitest_agent.so
 
         assert!(err.to_string().contains("cleanup"));
         assert!(err.to_string().contains("cleanup denied"));
+        assert!(hdc
+            .calls()
+            .iter()
+            .any(|call| matches!(call, HdcCall::Shell(command) if command.starts_with("rm -f"))));
         assert!(matches!(
             hdc.calls().last(),
-            Some(HdcCall::Shell(command)) if command.starts_with("rm -f")
+            Some(HdcCall::RemoveForward(_))
         ));
         fs::remove_dir_all(dir).expect("fixture dir should be removed");
     }
@@ -736,6 +1282,7 @@ root 303 1 0 uitest start-daemon singleness --extension-name uitest_agent.so
         let hdc = RecordingHdc::with_shell_outputs(vec![
             Ok(String::new()),
             Ok("cleanup ok\n".to_string()),
+            Ok(String::new()),
         ])
         .fail_push(
             "operation `file send` failed, stderr=permission denied, stdout=Xpm check failed",
@@ -770,10 +1317,10 @@ root 303 1 0 uitest start-daemon singleness --extension-name uitest_agent.so
             message.contains("Xpm check failed"),
             "unexpected error: {message}"
         );
-        assert!(matches!(
-            hdc.calls().last(),
-            Some(HdcCall::Shell(command)) if command == &format!("rm -f '{UITEST_REMOTE_PAYLOAD_PATH}'")
-        ));
+        assert!(hdc.calls().iter().any(|call| matches!(
+            call,
+            HdcCall::Shell(command) if command == &format!("rm -f '{UITEST_REMOTE_PAYLOAD_PATH}'")
+        )));
         assert!(
             hdc.calls().iter().all(|call| {
                 !matches!(call, HdcCall::Shell(command) if command.contains("aa start"))
@@ -791,6 +1338,8 @@ root 303 1 0 uitest start-daemon singleness --extension-name uitest_agent.so
         let hdc = RecordingHdc::with_shell_outputs(vec![
             Ok(String::new()),
             Ok("uitest launched\n".to_string()),
+            Ok("@scrcpy_grpc_socket\n".to_string()),
+            Ok(String::new()),
             Ok(String::new()),
         ])
         .fail_forward("fport denied");
@@ -804,9 +1353,13 @@ root 303 1 0 uitest start-daemon singleness --extension-name uitest_agent.so
             .expect_err("forward failure should be surfaced");
 
         assert!(err.to_string().contains("forward"));
+        assert!(hdc
+            .calls()
+            .iter()
+            .any(|call| matches!(call, HdcCall::Shell(command) if command.starts_with("rm -f"))));
         assert!(matches!(
             hdc.calls().last(),
-            Some(HdcCall::Shell(command)) if command.starts_with("rm -f")
+            Some(HdcCall::RemoveForward(_))
         ));
         fs::remove_dir_all(dir).expect("fixture dir should be removed");
     }

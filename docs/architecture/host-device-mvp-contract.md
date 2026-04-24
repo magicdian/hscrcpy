@@ -108,7 +108,10 @@ These are the current concrete command/API shapes used by the Rust host runtime:
 | push official `uitest` scrcpy payload | `hdc -t <resolved-target> file send <selected-libscrcpy-server.so> /data/local/tmp/scrcpy_server.so` | `crates/hscrcpy-host/src/uitest.rs` |
 | kill stale official `uitest` scrcpy processes | `hdc -t <resolved-target> shell kill -9 <xdevice_scrcpy-or-uitest-pid>` | `crates/hscrcpy-host/src/uitest.rs` |
 | launch official `uitest` scrcpy server | `hdc -t <resolved-target> shell uitest start-daemon singleness --extension-name scrcpy_server.so ...` | `crates/hscrcpy-host/src/uitest.rs` |
-| forward official `uitest` scrcpy socket | `hdc -t <resolved-target> fport tcp:27182 localabstract:scrcpy_grpc_socket` | `crates/hscrcpy-host/src/uitest.rs` |
+| wait for official `uitest` scrcpy socket | `hdc -t <resolved-target> shell cat /proc/net/unix | grep -F scrcpy_grpc_socket` | `crates/hscrcpy-host/src/uitest.rs` |
+| forward official `uitest` scrcpy socket | `hdc -t <resolved-target> fport tcp:<dynamic-local-port> localabstract:scrcpy_grpc_socket` | `crates/hscrcpy-host/src/uitest.rs` |
+| launch official recorder-mode `uitest` server | `hdc -t <resolved-target> shell uitest start-daemon singleness --extension-name libscreen_recorder.z.so -p <port> -m 1 -screenId <id>` | `crates/hscrcpy-host/src/uitest.rs` |
+| forward official recorder-mode port | `hdc -t <resolved-target> fport tcp:<dynamic-local-port> tcp:5001` | `crates/hscrcpy-host/src/uitest.rs` |
 | remove temporary official `uitest` payload | `hdc -t <resolved-target> shell rm -f /data/local/tmp/scrcpy_server.so` | `crates/hscrcpy-host/src/uitest.rs` |
 
 Rules:
@@ -118,7 +121,16 @@ Rules:
 * Companion install/update decisions are based on the top-level `versionCode` / `versionName` fields from `bm dump`, not nested quick-fix or module fields.
 * Route selection must be explicit in host diagnostics. The HAP route and the official `uitest` route must both feed a route-neutral video ingress layer.
 * The selected route must fail fast. If `--route uitest` fails during payload selection, stale process cleanup, payload push, daemon launch, socket forwarding, gRPC connect/start/status, first-frame ingestion, renderer handoff, or shutdown, the host must not automatically launch the `hscrcpy-server` HAP route.
+* The official `uitest` route should use a fresh dynamic local TCP port for `scrcpy_grpc_socket` forwarding so stale fixed-port listeners cannot block startup. Startup still best-effort removes the legacy `tcp:27184 -> localabstract:scrcpy_grpc_socket` forward.
+* The host supports two official `uitest` flavors for investigation: `scrcpy` maps to `hosScrcpy/libscrcpy_server_unix_*`, while `recorder` maps to `xdevice-devicetest/recorder/libscrcpy_server*.z.so`, the remote file name `libscreen_recorder.z.so`, and device TCP port `5001`.
+* Recorder flavor must try bundled `libscrcpy_server*.z.so` payloads in descending filename order, try both `tcp:<local> -> tcp:5001` and `tcp:<local> -> localabstract:screen_record_grpc_socket` with fport before daemon launch, verify that the `libscreen_recorder` process remains alive after launch, and clean up before trying the next payload. This mirrors the official `record_agent.py` fallback path for device-specific recorder libraries.
+* Scrcpy flavor must not start gRPC until the device-side `scrcpy_grpc_socket` appears in `/proc/net/unix` and `hdc fport` has returned successfully. A missing device socket is reported as `grpc-socket-ready`; a later local connection failure is reported as `grpc-connect`. Recorder flavor currently skips localabstract readiness and probes `tcp:5001` because `screen_record_grpc_socket` was not observed on device during bringup.
+* The official `uitest` route must clean stale `xdevice_scrcpy` state plus the active dynamic `tcp:<port> -> localabstract:scrcpy_grpc_socket` or `tcp:<port> -> tcp:5001` forward during startup compensation and graceful shutdown. Ctrl+C/SIGINT during capture is a graceful shutdown request, not a process-abort path.
+* The official `uitest` H.264 stream may begin with non-IDR access units. Host live preview must wait for the first IDR/keyframe before writing to ffplay.
+* While waiting for the first IDR/keyframe, host live preview must cache H.264 decoder configuration NALs (`SPS` type 7 and `PPS` type 8) from pre-IDR access units and write them before the first IDR. Dropping those units causes ffplay startup failures such as `non-existing PPS`.
+* Real-device checks against the official Java `hosScrcpy` API on 2026-04-24 showed that automatic startup calls to `ScrcpyService/onRequestIDRFrame` can close the active `onStart` stream. Keep `onRequestIDRFrame` available as a manual diagnostic/control method, but do not call it by default while waiting for the first decodable frame.
 * The current `uitest` route uses a standard host-side `tonic` + `prost` generated gRPC client for official `ScrcpyService/onStart`, `onEnd`, and `onRequestIDRFrame`. Protocol-specific generated types stay inside `crates/hscrcpy-host/src/official_scrcpy.rs`; the stream is normalized through `OfficialScrcpyIngressAdapter` into route-neutral H.264 ingress before reaching the bringup renderer / ffplay path.
+* Scrcpy flavor startup should send best-effort `power-shell wakeup` after `onStart`, matching the official Java API startup behavior without mutating screen content.
 * The repo-local schema lives at `crates/hscrcpy-host/proto/scrcpy.proto`. It was reconstructed from the generated descriptor embedded in `xdevice_devicetest-6.1.0.210-py3-none-any.whl/devicetest/controllers/tools/recorder/proto/scrcpy_pb2.py`; it is not a public Huawei `.proto` source file and was not recovered by reverse engineering the device-side `.so`.
 
 ### 4.2 Session Channel Messages
@@ -475,7 +487,7 @@ Rules:
 
 * Host detects the device, sees `ready`, opens `session`, negotiates `h264`, receives `session_ready`, then opens `video`.
 * `video_capture` and `input_injection` are both `granted`, so the session starts without user interaction.
-* Device bootstrap logs `state=listening port=27182 bound=true`, and later the host CLI captures JPEG or H.264 artifacts without a reset/EOF before the first frame.
+* Device bootstrap logs `state=listening port=27182 bound=true`, and later the host CLI receives JPEG or H.264 units without a reset/EOF before the first frame.
 
 ### Base
 
@@ -514,11 +526,12 @@ Rules:
 * Manual bringup checks for the HAP route:
   * `cargo run -p hscrcpy-host-cli -- --device auto --route hscrcpy-server --codec jpeg --max-frames 30 --output-dir /tmp/hscrcpy-preview --no-live-preview`
   * `cargo run -p hscrcpy-host-cli -- --device auto --route hscrcpy-server --codec h264 --max-frames 30 --output-dir /tmp/hscrcpy-preview`
-  * assert JPEG artifacts (`preview.html`, `latest.jpg`, `frames/*.jpg`) and H.264 artifacts (`frames/*.h264`, `stream.h264` where applicable) are produced
+  * `cargo run -p hscrcpy-host-cli -- --device auto --route hscrcpy-server --codec h264 --max-frames 30 --output-dir /tmp/hscrcpy-preview --record-h264`
+  * assert JPEG artifacts (`preview.html`, `latest.jpg`, `frames/*.jpg`) are produced on the JPEG route, H.264 live preview works without disk recording by default, and H.264 artifacts (`frames/*.h264`, `stream.h264`) are produced only when `--record-h264` is set
 * Manual lifecycle and stream check for the official `uitest` route:
   * `cargo run -p hscrcpy-host-cli -- --device auto --route uitest --codec h264 --uitest-payload third_party/hypium/hosScrcpy/6.1.0.210/libscrcpy/libscrcpy_server_unix_6.5-20260313.z.so --max-frames 30 --output-dir /tmp/hscrcpy-uitest-preview --ffplay-bin /opt/homebrew/bin/ffplay`
   * expected success: lifecycle diagnostics run through stale process scan, payload push, `uitest start-daemon`, `scrcpy_grpc_socket` forwarding, and payload cleanup; `ScrcpyService/onStart` returns H.264 access units; ffplay displays real device frames; `ScrcpyService/onEnd` is called when `--max-frames` is reached
-  * expected failure shape: errors name `route=uitest`, a concrete phase such as `grpc-connect`, `grpc-start`, `grpc-status`, `grpc-stream`, frame ingress, or render, plus target `127.0.0.1:27182`, method, selected payload, selected codec, and the underlying transport/protocol context
+  * expected failure shape: errors name `route=uitest`, a concrete phase such as `local-port-selection`, `grpc-socket-ready`, `grpc-connect`, `grpc-start`, `grpc-status`, `grpc-stream`, frame ingress, or render, plus the dynamic `127.0.0.1:<port>` target, method, selected payload, selected codec, device runtime diagnostics, and the underlying transport/protocol context
 * Device-side inspection during manual checks:
   * `DEVICE="$(hdc list targets | awk 'NR==1{print $1}')"`
   * `hdc -t "$DEVICE" shell 'ps -ef | grep -E "[x]device_scrcpy|[u]itest start-daemon|[h]scrcpy"'`

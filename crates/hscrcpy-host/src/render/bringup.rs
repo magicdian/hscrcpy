@@ -1,5 +1,8 @@
 use super::{JpegFrame, JpegFrameSink};
-use crate::video::{h264::H264AccessUnit, PreparedVideoIngress};
+use crate::video::{
+    h264::{self, H264AccessUnit},
+    PreparedVideoIngress,
+};
 use crate::{HostError, HostResult};
 use hscrcpy_contracts::VideoCodec;
 use std::fs::{self, OpenOptions};
@@ -10,18 +13,21 @@ use std::time::{Duration, Instant};
 
 const H264_ANNEX_B_START_CODE: [u8; 4] = [0, 0, 0, 1];
 const DEFAULT_FFPLAY_BIN: &str = "ffplay";
+const DEFAULT_FFPLAY_FRAMERATE: u16 = 120;
 const H264_DIAGNOSTIC_SUMMARY_INTERVAL: usize = 120;
 const H264_LIVE_PREVIEW_WRITE_WARN_US: u64 = 20_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct H264LivePreviewConfig {
     pub ffplay_bin: String,
+    pub framerate: u16,
 }
 
 impl Default for H264LivePreviewConfig {
     fn default() -> Self {
         Self {
             ffplay_bin: DEFAULT_FFPLAY_BIN.to_string(),
+            framerate: DEFAULT_FFPLAY_FRAMERATE,
         }
     }
 }
@@ -48,7 +54,8 @@ pub struct RenderedArtifact {
     pub frame_index: usize,
     pub codec: VideoCodec,
     pub timestamp_micros: u64,
-    pub artifact_path: PathBuf,
+    pub is_keyframe: Option<bool>,
+    pub artifact_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -131,6 +138,7 @@ pub struct BringupRenderSurface {
     h264_live_preview_config: Option<H264LivePreviewConfig>,
     h264_live_preview: Option<H264LivePreview>,
     live_preview_status: Option<String>,
+    record_h264_artifacts: bool,
     h264_diagnostics: H264DiagnosticState,
     pending_h264_diagnostic_summary: Option<BringupDiagnosticsSummary>,
     stats: RenderStreamStats,
@@ -146,6 +154,7 @@ impl BringupRenderSurface {
             h264_live_preview_config: None,
             h264_live_preview: None,
             live_preview_status: None,
+            record_h264_artifacts: false,
             h264_diagnostics: H264DiagnosticState::default(),
             pending_h264_diagnostic_summary: None,
             stats: RenderStreamStats::default(),
@@ -154,6 +163,11 @@ impl BringupRenderSurface {
 
     pub fn with_h264_live_preview(mut self, config: H264LivePreviewConfig) -> Self {
         self.h264_live_preview_config = Some(config);
+        self
+    }
+
+    pub fn with_h264_artifact_recording(mut self) -> Self {
+        self.record_h264_artifacts = true;
         self
     }
 
@@ -204,11 +218,19 @@ impl BringupRenderSurface {
 
         write_text_file(
             &session_dir.join("session.txt"),
-            &render_session_report(&session, self.live_preview_status.as_deref()),
+            &render_session_report(
+                &session,
+                self.live_preview_status.as_deref(),
+                self.record_h264_artifacts,
+            ),
         )?;
         write_text_file(
             &session_dir.join("preview.html"),
-            &render_preview_html(&session, self.live_preview_status.as_deref()),
+            &render_preview_html(
+                &session,
+                self.live_preview_status.as_deref(),
+                self.record_h264_artifacts,
+            ),
         )?;
 
         Ok(())
@@ -290,24 +312,32 @@ impl BringupRenderSurface {
         let present_started_at = Instant::now();
 
         let session_dir = self.require_session_dir()?;
-        let frame_path = self
-            .require_frames_dir()?
-            .join(format!("frame-{frame_index:06}.h264"));
-        fs::write(&frame_path, &access_unit.encoded_bytes)
-            .map_err(|error| io_error("write h264 access unit", &frame_path, error))?;
+        let frame_path = if self.record_h264_artifacts {
+            let frame_path = self
+                .require_frames_dir()?
+                .join(format!("frame-{frame_index:06}.h264"));
+            fs::write(&frame_path, &access_unit.encoded_bytes)
+                .map_err(|error| io_error("write h264 access unit", &frame_path, error))?;
 
-        let stream_path = session_dir.join("stream.h264");
-        let mut stream = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&stream_path)
-            .map_err(|error| io_error("open h264 stream artifact", &stream_path, error))?;
-        stream
-            .write_all(&H264_ANNEX_B_START_CODE)
-            .and_then(|_| stream.write_all(&access_unit.encoded_bytes))
-            .map_err(|error| io_error("append h264 access unit", &stream_path, error))?;
+            let stream_path = session_dir.join("stream.h264");
+            let mut stream = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&stream_path)
+                .map_err(|error| io_error("open h264 stream artifact", &stream_path, error))?;
+            stream
+                .write_all(&H264_ANNEX_B_START_CODE)
+                .and_then(|_| stream.write_all(&access_unit.encoded_bytes))
+                .map_err(|error| io_error("append h264 access unit", &stream_path, error))?;
+            Some(frame_path)
+        } else {
+            None
+        };
 
         let preview_result = self.feed_live_preview(access_unit)?;
+        if let Some(note) = preview_result.note.as_deref() {
+            self.append_event_note(note)?;
+        }
         if let Some(error) = preview_result.error.as_deref() {
             self.live_preview_status = Some(format!("disabled: {error}"));
             self.append_event_note(&format!("live_preview status=disabled reason={error}"))?;
@@ -331,6 +361,7 @@ impl BringupRenderSurface {
             frame_index,
             VideoCodec::H264,
             access_unit.timestamp_micros,
+            Some(access_unit.is_keyframe),
             frame_path.clone(),
         )?;
         self.stats.h264_access_units += 1;
@@ -338,6 +369,7 @@ impl BringupRenderSurface {
             frame_index,
             codec: VideoCodec::H264,
             timestamp_micros: access_unit.timestamp_micros,
+            is_keyframe: Some(access_unit.is_keyframe),
             artifact_path: frame_path,
         })
     }
@@ -359,14 +391,16 @@ impl BringupRenderSurface {
             frame_index,
             VideoCodec::Jpeg,
             frame.timestamp_micros,
-            frame_path.clone(),
+            None,
+            Some(frame_path.clone()),
         )?;
         self.stats.jpeg_frames += 1;
         Ok(RenderedArtifact {
             frame_index,
             codec: VideoCodec::Jpeg,
             timestamp_micros: frame.timestamp_micros,
-            artifact_path: frame_path,
+            is_keyframe: None,
+            artifact_path: Some(frame_path),
         })
     }
 
@@ -379,13 +413,18 @@ impl BringupRenderSurface {
         };
         match preview.present_access_unit(access_unit) {
             Ok(metrics) => Ok(H264LivePreviewResult {
-                write_duration_us: Some(metrics.write_duration_us),
+                write_duration_us: metrics.write_duration_us,
+                note: metrics.waiting_for_keyframe.then(|| {
+                    "live_preview status=waiting_for_keyframe reason=first_h264_access_unit_is_not_idr"
+                        .to_string()
+                }),
                 error: None,
             }),
             Err(error) => {
                 self.h264_live_preview = None;
                 Ok(H264LivePreviewResult {
                     write_duration_us: None,
+                    note: None,
                     error: Some(error.to_string()),
                 })
             }
@@ -397,7 +436,8 @@ impl BringupRenderSurface {
         frame_index: usize,
         codec: VideoCodec,
         timestamp_micros: u64,
-        artifact_path: PathBuf,
+        is_keyframe: Option<bool>,
+        artifact_path: Option<PathBuf>,
     ) -> HostResult<()> {
         let event_path = self.require_session_dir()?.join("events.log");
         let mut log = OpenOptions::new()
@@ -405,19 +445,23 @@ impl BringupRenderSurface {
             .append(true)
             .open(&event_path)
             .map_err(|error| io_error("open render event log", &event_path, error))?;
+        let artifact_value = artifact_path
+            .as_ref()
+            .map_or_else(|| "disabled".to_string(), |path| path.display().to_string());
         writeln!(
             log,
-            "frame={} codec={} pts_us={} artifact={}",
+            "frame={} codec={} pts_us={} keyframe={} artifact={}",
             frame_index,
             codec_name(&codec),
             timestamp_micros,
-            artifact_path.display()
+            format_optional_bool(is_keyframe),
+            artifact_value
         )
         .map_err(|error| io_error("append render event log", &event_path, error))?;
 
         self.stats.total_units = frame_index;
         self.stats.last_timestamp_micros = Some(timestamp_micros);
-        self.stats.last_artifact_path = Some(artifact_path);
+        self.stats.last_artifact_path = artifact_path;
         Ok(())
     }
 
@@ -463,16 +507,21 @@ struct H264LivePreview {
     command_path: String,
     child: Child,
     stdin: Option<ChildStdin>,
+    received_keyframe: bool,
+    logged_waiting_for_keyframe: bool,
+    pending_decoder_config: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct H264LivePreviewMetrics {
-    write_duration_us: u64,
+    write_duration_us: Option<u64>,
+    waiting_for_keyframe: bool,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct H264LivePreviewResult {
     write_duration_us: Option<u64>,
+    note: Option<String>,
     error: Option<String>,
 }
 
@@ -668,6 +717,8 @@ impl H264LivePreview {
             .arg("-framedrop")
             .arg("-window_title")
             .arg(format!("hscrcpy {}", session.session_id))
+            .arg("-framerate")
+            .arg(config.framerate.to_string())
             .arg("-f")
             .arg("h264")
             .arg("-i")
@@ -693,6 +744,9 @@ impl H264LivePreview {
             command_path: config.ffplay_bin.clone(),
             child,
             stdin: Some(stdin),
+            received_keyframe: false,
+            logged_waiting_for_keyframe: false,
+            pending_decoder_config: Vec::new(),
         })
     }
 
@@ -704,6 +758,26 @@ impl H264LivePreview {
         &mut self,
         access_unit: &H264AccessUnit,
     ) -> HostResult<H264LivePreviewMetrics> {
+        if !self.received_keyframe && !access_unit.is_keyframe {
+            let config = h264::decoder_config_bytes(&access_unit.encoded_bytes)?;
+            if !config.is_empty() {
+                self.pending_decoder_config = config;
+            }
+            let should_log = !self.logged_waiting_for_keyframe;
+            self.logged_waiting_for_keyframe = true;
+            return Ok(H264LivePreviewMetrics {
+                write_duration_us: None,
+                waiting_for_keyframe: should_log,
+            });
+        }
+        if !self.received_keyframe {
+            let config = h264::decoder_config_bytes(&access_unit.encoded_bytes)?;
+            if !config.is_empty() {
+                self.pending_decoder_config = config;
+            }
+            self.received_keyframe = true;
+        }
+
         let stdin = self.stdin.as_mut().ok_or_else(|| {
             HostError::RenderFailure(format!(
                 "live preview command `{}` stdin is unavailable",
@@ -711,6 +785,17 @@ impl H264LivePreview {
             ))
         })?;
         let write_started_at = Instant::now();
+        if !self.pending_decoder_config.is_empty() {
+            stdin
+                .write_all(&self.pending_decoder_config)
+                .map_err(|error| {
+                    HostError::RenderFailure(format!(
+                        "write h264 decoder config into live preview command `{}` failed: {error}",
+                        self.command_path
+                    ))
+                })?;
+            self.pending_decoder_config.clear();
+        }
         stdin
             .write_all(&access_unit.encoded_bytes)
             .and_then(|_| stdin.flush())
@@ -721,7 +806,8 @@ impl H264LivePreview {
                 ))
             })?;
         Ok(H264LivePreviewMetrics {
-            write_duration_us: duration_to_u64_micros(write_started_at.elapsed()),
+            write_duration_us: Some(duration_to_u64_micros(write_started_at.elapsed())),
+            waiting_for_keyframe: false,
         })
     }
 }
@@ -776,13 +862,16 @@ fn duration_to_u64_micros(duration: Duration) -> u64 {
 fn render_session_report(
     session: &RenderSessionDescriptor,
     live_preview_status: Option<&str>,
+    record_h264_artifacts: bool,
 ) -> String {
     format!(
-        "session_id={}\nselected_codec={}\ndisplay_width={}\ndisplay_height={}\npreview_html=preview.html\njpeg_latest=latest.jpg\nh264_stream=stream.h264\nlive_preview={}\n",
+        "session_id={}\nselected_codec={}\ndisplay_width={}\ndisplay_height={}\npreview_html=preview.html\njpeg_latest=latest.jpg\nh264_recording={}\nh264_stream={}\nlive_preview={}\n",
         session.session_id,
         codec_name(&session.selected_codec),
         session.display_width,
         session.display_height,
+        if record_h264_artifacts { "enabled" } else { "disabled" },
+        if record_h264_artifacts { "stream.h264" } else { "disabled" },
         live_preview_status.unwrap_or("not_configured"),
     )
 }
@@ -790,14 +879,21 @@ fn render_session_report(
 fn render_preview_html(
     session: &RenderSessionDescriptor,
     live_preview_status: Option<&str>,
+    record_h264_artifacts: bool,
 ) -> String {
+    let h264_recording_text = if record_h264_artifacts {
+        "H264 mainline records per-access-unit artifacts under <code>frames/</code> and appends <code>stream.h264</code>."
+    } else {
+        "H264 mainline keeps disk recording disabled unless the host is started with explicit H264 recording enabled."
+    };
     format!(
-        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta http-equiv=\"refresh\" content=\"1\">\n<title>hscrcpy Render Bringup</title>\n<style>\nbody {{ font-family: ui-monospace, monospace; margin: 24px; background: #111; color: #f5f5f5; }}\nmain {{ max-width: 960px; margin: 0 auto; }}\nimg {{ width: 100%; max-width: 100%; border: 1px solid #444; background: #000; }}\np {{ line-height: 1.5; }}\ncode {{ color: #8be9fd; }}\n</style>\n</head>\n<body>\n<main>\n<h1>hscrcpy host render bringup</h1>\n<p>Session: <code>{}</code></p>\n<p>Negotiated codec: <code>{}</code></p>\n<p>Display hint: <code>{}x{}</code></p>\n<p>Live preview: <code>{}</code></p>\n<p>This preview auto-refreshes once per second. JPEG fallback updates <code>latest.jpg</code> directly. H264 mainline writes per-access-unit artifacts under <code>frames/</code>, appends an Annex-B-style stream to <code>stream.h264</code>, and may also feed a realtime ffplay preview when available.</p>\n<img src=\"latest.jpg\" alt=\"Waiting for JPEG fallback frame\">\n</main>\n</body>\n</html>\n",
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta http-equiv=\"refresh\" content=\"1\">\n<title>hscrcpy Render Bringup</title>\n<style>\nbody {{ font-family: ui-monospace, monospace; margin: 24px; background: #111; color: #f5f5f5; }}\nmain {{ max-width: 960px; margin: 0 auto; }}\nimg {{ width: 100%; max-width: 100%; border: 1px solid #444; background: #000; }}\np {{ line-height: 1.5; }}\ncode {{ color: #8be9fd; }}\n</style>\n</head>\n<body>\n<main>\n<h1>hscrcpy host render bringup</h1>\n<p>Session: <code>{}</code></p>\n<p>Negotiated codec: <code>{}</code></p>\n<p>Display hint: <code>{}x{}</code></p>\n<p>Live preview: <code>{}</code></p>\n<p>This preview auto-refreshes once per second. JPEG fallback updates <code>latest.jpg</code> directly. {}</p>\n<img src=\"latest.jpg\" alt=\"Waiting for JPEG fallback frame\">\n</main>\n</body>\n</html>\n",
         session.session_id,
         codec_name(&session.selected_codec),
         session.display_width,
         session.display_height,
         live_preview_status.unwrap_or("not_configured"),
+        h264_recording_text,
     )
 }
 
@@ -814,6 +910,14 @@ fn codec_name(codec: &VideoCodec) -> &'static str {
         VideoCodec::H264 => "h264",
         VideoCodec::Jpeg => "jpeg",
         VideoCodec::H265Experimental => "h265",
+    }
+}
+
+fn format_optional_bool(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "na",
     }
 }
 
@@ -889,14 +993,20 @@ mod tests {
             .expect("preview page should exist")
             .contains("latest.jpg"));
         assert_eq!(
-            fs::read(&artifact.artifact_path).expect("frame artifact should exist"),
+            fs::read(
+                artifact
+                    .artifact_path
+                    .as_ref()
+                    .expect("jpeg artifact path should exist")
+            )
+            .expect("frame artifact should exist"),
             vec![0xff, 0xd8, 0xff, 0xd9]
         );
     }
 
     #[test]
-    fn appends_h264_access_units_into_stream_artifacts() {
-        let temp = TestDir::new("h264");
+    fn skips_h264_artifacts_by_default() {
+        let temp = TestDir::new("h264-no-record");
         let mut surface = BringupRenderSurface::new(temp.path());
         surface
             .initialize_session(session(VideoCodec::H264))
@@ -911,11 +1021,53 @@ mod tests {
             .expect("h264 access unit should render");
 
         assert_eq!(artifact.codec, VideoCodec::H264);
+        assert_eq!(artifact.is_keyframe, Some(true));
+        assert_eq!(artifact.artifact_path, None);
+        assert_eq!(surface.stats().h264_access_units, 1);
+        assert_eq!(surface.stats().last_artifact_path, None);
+
+        let session_dir = surface.session_dir().expect("session dir should exist");
+        assert!(
+            !session_dir.join("stream.h264").exists(),
+            "stream.h264 should be opt-in"
+        );
+        assert!(
+            fs::read_to_string(session_dir.join("events.log"))
+                .expect("events log should exist")
+                .contains("keyframe=true artifact=disabled"),
+            "events.log should record disabled artifact state"
+        );
+    }
+
+    #[test]
+    fn appends_h264_access_units_into_stream_artifacts_when_enabled() {
+        let temp = TestDir::new("h264");
+        let mut surface = BringupRenderSurface::new(temp.path()).with_h264_artifact_recording();
+        surface
+            .initialize_session(session(VideoCodec::H264))
+            .expect("render surface should initialize");
+
+        let artifact = surface
+            .present_video_ingress(&PreparedVideoIngress::H264(H264AccessUnit {
+                timestamp_micros: 456,
+                is_keyframe: true,
+                encoded_bytes: vec![1, 2, 3, 4],
+            }))
+            .expect("h264 access unit should render");
+
+        assert_eq!(artifact.codec, VideoCodec::H264);
+        assert_eq!(artifact.is_keyframe, Some(true));
         assert_eq!(surface.stats().h264_access_units, 1);
 
         let session_dir = surface.session_dir().expect("session dir should exist");
         assert_eq!(
-            fs::read(&artifact.artifact_path).expect("access unit artifact should exist"),
+            fs::read(
+                artifact
+                    .artifact_path
+                    .as_ref()
+                    .expect("h264 artifact path should exist")
+            )
+            .expect("access unit artifact should exist"),
             vec![1, 2, 3, 4]
         );
         assert_eq!(

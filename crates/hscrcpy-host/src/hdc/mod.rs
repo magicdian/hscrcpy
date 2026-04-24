@@ -19,6 +19,9 @@ pub trait HdcBridge {
         }
     }
     fn forward_port(&self, device_id: &str, local_port: u16, remote_port: u16) -> HostResult<()>;
+    fn remove_forward(&self, _device_id: &str, _spec: &HdcForwardSpec) -> HostResult<()> {
+        Ok(())
+    }
     fn push_file(&self, _device_id: &str, local_path: &Path, remote_path: &str) -> HostResult<()> {
         Err(HostError::ContractViolation(format!(
             "hdc bridge does not support file push from {} to {remote_path}",
@@ -278,6 +281,30 @@ impl HdcBridge for RuntimeHdcBridge {
             device_id,
             &HdcForwardSpec::tcp_to_tcp(local_port, remote_port),
         )
+    }
+
+    fn remove_forward(&self, device_id: &str, spec: &HdcForwardSpec) -> HostResult<()> {
+        let device_id = validate_device_id(device_id)?;
+        if !matches!(spec.local, HdcForwardEndpoint::Tcp(_)) {
+            return Err(HostError::ContractViolation(format!(
+                "hdc fport rm requires a local tcp endpoint, got {}",
+                spec.local
+            )));
+        }
+
+        let local = spec.local.to_hdc_arg()?;
+        let remote = spec.remote.to_hdc_arg()?;
+        let resolved_target = self.resolve_device_target(device_id)?;
+        let args = vec![
+            "-t".to_string(),
+            resolved_target.clone(),
+            "fport".to_string(),
+            "rm".to_string(),
+            local,
+            remote,
+        ];
+        self.run_checked("remove forward endpoint", Some(&resolved_target), &args)?;
+        Ok(())
     }
 
     fn push_file(&self, device_id: &str, local_path: &Path, remote_path: &str) -> HostResult<()> {

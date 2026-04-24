@@ -101,7 +101,7 @@ Use this contract when changing the official `uitest` projection route, generate
 
 #### 2. Signatures
 
-* CLI command: `hscrcpy-host-cli --device <id|auto> --route uitest --codec h264 [--ffplay-bin <path>] [--max-frames <n>] [--uitest-payload <path>]`
+* CLI command: `hscrcpy-host-cli --device <id|auto> --route uitest --codec h264 [--ffplay-bin <path>] [--max-frames <n>] [--uitest-flavor <scrcpy|recorder>] [--uitest-payload <path>] [--record-h264]`
 * Build script: `crates/hscrcpy-host/build.rs`
 * Proto source: `crates/hscrcpy-host/proto/scrcpy.proto`
 * Generated include: `include!(concat!(env!("OUT_DIR"), "/scrcpy.rs"))` inside `crates/hscrcpy-host/src/official_scrcpy.rs`
@@ -117,7 +117,16 @@ Use this contract when changing the official `uitest` projection route, generate
 * Generated protobuf/gRPC types may be referenced inside `official_scrcpy.rs` only; CLI, renderer, and video modules consume route-neutral host types.
 * `ReplyMessage.payload` may contain mixed `ParamValue` entries. Exactly one `val_bytes` entry is treated as the H.264 access unit candidate; zero, empty, or multiple byte entries fail before renderer handoff.
 * `--route uitest` must never fall back to the HAP `hscrcpy-server` route after a selected-route failure.
-* Live H.264 preview writes access units to ffplay stdin (`-f h264 -i pipe:0`). Disk artifacts under `frames/` and `stream.h264` are diagnostics, not the playback source.
+* `--uitest-flavor scrcpy` uses the `hosScrcpy` payload, `scrcpy_grpc_socket`, and HoKit-observed scrcpy launch arguments. `--uitest-flavor recorder` uses the `xdevice-devicetest/recorder` payload line, device TCP port `5001`, and the official recorder launch shape `-p 5001 -m 1 -screenId <id>`.
+* Recorder flavor must follow the official `record_agent.py` fallback behavior: try bundled `libscrcpy_server*.z.so` payloads in descending filename order, try both `tcp:<local> -> tcp:5001` and `tcp:<local> -> localabstract:screen_record_grpc_socket` with fport before daemon launch, verify that the `libscreen_recorder` process remains alive after launch, and clean up before trying the next payload.
+* Live H.264 preview writes access units to ffplay stdin (`-f h264 -i pipe:0`). Disk artifacts under `frames/` and `stream.h264` are opt-in diagnostics, not the playback source, and must not be enabled by default during latency testing.
+* Official `uitest` H.264 may start with non-IDR access units. Live preview must not feed ffplay until the first IDR/keyframe is observed.
+* While waiting for the first IDR/keyframe, live preview must cache H.264 decoder configuration NALs (`SPS` type 7 and `PPS` type 8) from pre-IDR access units and write them before the first IDR. Dropping all pre-IDR bytes can make ffplay fail with `non-existing PPS` even after later IDR frames arrive.
+* Do not automatically call `ScrcpyService/onRequestIDRFrame` during startup by default. Real-device checks against the official Java `hosScrcpy` API on 2026-04-24 showed startup IDR requests can close the active `onStart` stream. Keep the method available as a manual diagnostic/control hook.
+* Scrcpy flavor startup should send best-effort `power-shell wakeup` after `onStart`, matching the official Java API startup behavior without mutating screen content.
+* Host shutdown paths, including Ctrl+C/SIGINT and `grpc-start` startup failure after `uitest` launch, must attempt `ScrcpyService/onEnd` when a runtime exists and clean up stale official `xdevice_scrcpy` processes plus the dynamically forwarded scrcpy localabstract socket or recorder TCP port.
+* Use a fresh dynamic local TCP port for official `uitest` gRPC forwarding. Do not assume legacy `tcp:27184` is free; startup may best-effort remove it, but active sessions should not depend on it.
+* Wait for device-side `scrcpy_grpc_socket` readiness before creating the scrcpy-flavor HDC forward, then start gRPC only after `hdc fport` succeeds. Keep `grpc-socket-ready` distinct from `grpc-connect` in errors. Recorder flavor currently skips localabstract readiness and probes `tcp:5001` because `screen_record_grpc_socket` was not observed on device during bringup.
 
 #### 4. Validation & Error Matrix
 
@@ -125,10 +134,12 @@ Use this contract when changing the official `uitest` projection route, generate
 |----------|---------------------|----------------|
 | Proto generation | `cargo check -p hscrcpy-host --offline` builds generated client | build script or generated include failure |
 | Route startup | selected route is `uitest` and selected codec is `h264` | route/phase error with no HAP fallback |
+| Device socket readiness | scrcpy flavor: `scrcpy_grpc_socket` appears in `/proc/net/unix` after `uitest start-daemon`; recorder flavor: `tcp:5001` is forwarded directly | `grpc-socket-ready` or `grpc-connect` context |
 | gRPC connect/start | target is forwarded local TCP, method is named in errors | `grpc-connect`, `grpc-start`, or `grpc-status` context |
 | Stream message conversion | exactly one non-empty `val_bytes` payload | `ContractViolation` before `OfficialScrcpyIngressAdapter` |
 | Renderer handoff | payload is Annex-B H.264 | H.264 ingress validation error |
 | Preview | ffplay consumes stdin pipe | `live_preview status=disabled` and `ffplay_write_*` diagnostics |
+| Shutdown / interrupted capture | receive loop can leave idle waits, then `onEnd` and route cleanup run | no stale `xdevice_scrcpy` process or lingering active dynamic forward |
 
 #### 5. Good/Base/Bad Cases
 
@@ -154,11 +165,11 @@ Use this contract when changing the official `uitest` projection route, generate
 ##### Wrong
 
 * Reintroducing a production `h2` frame parser or manual protobuf decoder beside generated tonic/prost bindings.
-* Writing H.264 to disk and pointing ffplay at `stream.h264` for live playback.
+* Writing H.264 to disk by default or pointing ffplay at `stream.h264` for live playback.
 
 ##### Correct
 
-* Use `tonic`/`prost` generated bindings for the gRPC boundary, isolate them in `official_scrcpy.rs`, and feed ffplay directly through stdin while keeping file artifacts optional diagnostics.
+* Use `tonic`/`prost` generated bindings for the gRPC boundary, isolate them in `official_scrcpy.rs`, and feed ffplay directly through stdin while keeping file artifacts optional diagnostics behind `--record-h264`.
 
 ### Scenario: Introducing New Native Runtime Modules
 

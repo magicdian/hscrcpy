@@ -7,13 +7,16 @@ use crate::companion::{
 use crate::hdc::{HdcBridge, RuntimeHdcBridge};
 use crate::official_scrcpy::OfficialScrcpyClient;
 use crate::route::HostRoute;
-use crate::uitest::UitestLaunchConfig;
+use crate::uitest::{
+    cleanup_uitest_runtime, collect_uitest_runtime_diagnostics, UitestLaunchConfig,
+    UITEST_GRPC_SOCKET_NAME,
+};
 use crate::video::{
     classify_negotiated_video_path, normalized_requested_codec_order, select_codec_for_startup,
     CodecSelectionDiagnostics, HostCodecCapability, NegotiatedVideoPath,
     OfficialScrcpyIngressAdapter, PreparedVideoIngress,
 };
-use crate::{HostError, HostResult};
+use crate::{host_log, HostError, HostResult};
 use hscrcpy_contracts::{
     AuthorizationState, AuthorizationUpdate, ChannelBinding, ChannelEndpoint, ChannelLayout,
     DeviceHello, DisplayInfo, FeatureAuthorization, HostHello, HostVideoLimits,
@@ -22,12 +25,17 @@ use hscrcpy_contracts::{
     SessionVideoConfig, TransportKind, VideoCodec, VideoCodecDescriptor, PROTOCOL_MAJOR_MVP,
     PROTOCOL_MINOR_MVP,
 };
+use std::net::TcpListener;
+use std::thread;
+use std::time::Duration;
 
 const SESSION_CHANNEL_TARGET: &str = "127.0.0.1:27182";
 const VIDEO_CHANNEL_TARGET: &str = "127.0.0.1:27183";
 const HOST_MAX_WIDTH: u16 = 1920;
 const HOST_MAX_HEIGHT: u16 = 1080;
 const H264_IFRAME_INTERVAL_MS: u32 = 2_000;
+const UITEST_GRPC_START_ATTEMPTS: usize = 5;
+const UITEST_GRPC_START_RETRY_MS: u64 = 150;
 
 #[derive(Debug, Clone)]
 pub struct SessionBootstrap {
@@ -109,25 +117,60 @@ where
             &host_codec_capability,
         )?;
         let session_id = build_session_id(&bootstrap.device_id);
-        let session_channel = session_channel_endpoint();
+        let session_channel = if bootstrap.route == HostRoute::Uitest {
+            uitest_grpc_channel_endpoint()?
+        } else {
+            session_channel_endpoint()
+        };
         let video_channel = video_channel_endpoint();
-        self.companion.launch_session(
-            &bootstrap.device_id,
-            &CompanionLaunchRequest {
-                route: bootstrap.route,
-                session_id: session_id.clone(),
-                session_channel: session_channel.clone(),
-                video_channel: video_channel.clone(),
-            },
-        )?;
+        let launch_request = CompanionLaunchRequest {
+            route: bootstrap.route,
+            session_id: session_id.clone(),
+            session_channel: session_channel.clone(),
+            video_channel: video_channel.clone(),
+        };
+        if let Err(error) = self
+            .companion
+            .launch_session(&bootstrap.device_id, &launch_request)
+        {
+            let error = if bootstrap.route == HostRoute::Uitest {
+                append_uitest_runtime_diagnostics(
+                    error,
+                    collect_uitest_runtime_diagnostics(&self.hdc, &bootstrap.device_id),
+                )
+            } else {
+                error
+            };
+            return Err(error);
+        }
 
         if bootstrap.route == HostRoute::Uitest {
-            return start_uitest_official_stream(
+            let startup_result = start_uitest_official_stream(
                 &bootstrap.device_id,
                 &bootstrap.request,
                 &session_channel,
                 &companion_plan.artifact_hint,
             );
+            if let Err(error) = startup_result {
+                let error = if matches!(error, HostError::TransportFailure(_)) {
+                    append_uitest_runtime_diagnostics(
+                        error,
+                        collect_uitest_runtime_diagnostics(&self.hdc, &bootstrap.device_id),
+                    )
+                } else {
+                    error
+                };
+                if let Ok(local_port) = endpoint_port(&session_channel) {
+                    let _ = cleanup_uitest_runtime(
+                        &self.hdc,
+                        &bootstrap.device_id,
+                        local_port,
+                        UITEST_GRPC_SOCKET_NAME,
+                    );
+                }
+                return Err(error);
+            }
+            return startup_result;
         }
 
         forward_hdc_endpoint(
@@ -284,6 +327,24 @@ fn session_channel_endpoint() -> ChannelEndpoint {
     }
 }
 
+fn uitest_grpc_channel_endpoint() -> HostResult<ChannelEndpoint> {
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(|error| {
+        HostError::TransportFailure(format!(
+            "route `uitest` phase `local-port-selection` failed to reserve local gRPC port: {error}"
+        ))
+    })?;
+    let port = listener.local_addr().map_err(|error| {
+        HostError::TransportFailure(format!(
+            "route `uitest` phase `local-port-selection` failed to read reserved local gRPC port: {error}"
+        ))
+    })?.port();
+    drop(listener);
+    Ok(ChannelEndpoint {
+        transport: TransportKind::HdcForward,
+        target: format!("127.0.0.1:{port}"),
+    })
+}
+
 fn video_channel_endpoint() -> ChannelEndpoint {
     ChannelEndpoint {
         transport: TransportKind::HdcForward,
@@ -307,6 +368,18 @@ fn forward_hdc_endpoint<H: HdcBridge>(
     Ok(())
 }
 
+fn append_uitest_runtime_diagnostics(error: HostError, diagnostics: String) -> HostError {
+    match error {
+        HostError::TransportFailure(message) => HostError::TransportFailure(format!(
+            "{message}; uitest_runtime_diagnostics {diagnostics}"
+        )),
+        HostError::HdcFailure(message) => HostError::HdcFailure(format!(
+            "{message}; uitest_runtime_diagnostics {diagnostics}"
+        )),
+        other => other,
+    }
+}
+
 fn start_uitest_official_stream(
     device_id: &str,
     request: &SessionStartRequest,
@@ -326,13 +399,35 @@ fn start_uitest_official_stream(
         )));
     }
 
-    let mut start_client = OfficialScrcpyClient::for_forwarded_local_tcp(local_port);
-    let target = start_client.config().target();
-    let stream = start_client.start().map_err(|error| {
+    let target = OfficialScrcpyClient::for_forwarded_local_tcp(local_port)
+        .config()
+        .target();
+    let mut last_start_error = None;
+    let mut stream = None;
+    for attempt in 1..=UITEST_GRPC_START_ATTEMPTS {
+        let mut start_client = OfficialScrcpyClient::for_forwarded_local_tcp(local_port);
+        match start_client.start() {
+            Ok(start_stream) => {
+                stream = Some(start_stream);
+                break;
+            }
+            Err(error) => {
+                last_start_error = Some(error);
+                if attempt < UITEST_GRPC_START_ATTEMPTS {
+                    thread::sleep(Duration::from_millis(UITEST_GRPC_START_RETRY_MS));
+                }
+            }
+        }
+    }
+    let stream = stream.ok_or_else(|| {
+        let error = last_start_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "ScrcpyService/onStart did not return a stream".to_string());
         HostError::TransportFailure(format!(
-            "route `uitest` phase `grpc-start` target `{target}` method `/ScrcpyService/onStart` selected_payload `{selected_payload}` selected_codec=h264: {error}"
+            "route `uitest` phase `grpc-start` target `{target}` method `/ScrcpyService/onStart` selected_payload `{selected_payload}` selected_codec=h264 attempts={UITEST_GRPC_START_ATTEMPTS}: {error}"
         ))
     })?;
+    wake_official_scrcpy_display(device_id, selected_payload);
 
     let authorization = FeatureAuthorization {
         video_capture: AuthorizationState::Granted,
@@ -386,9 +481,11 @@ fn start_uitest_official_stream(
         session_id.clone(),
         VideoCodec::H264,
         Box::new(OfficialScrcpyControlChannel {
+            device_id: device_id.to_string(),
             local_port,
-            target,
+            target: target.clone(),
             selected_payload: selected_payload.to_string(),
+            grpc_socket_name: UITEST_GRPC_SOCKET_NAME.to_string(),
         }),
         Box::new(OfficialScrcpyVideoChannel {
             stream,
@@ -412,9 +509,11 @@ fn start_uitest_official_stream(
 }
 
 struct OfficialScrcpyControlChannel {
+    device_id: String,
     local_port: u16,
     target: String,
     selected_payload: String,
+    grpc_socket_name: String,
 }
 
 impl super::runtime::SessionChannelTransport for OfficialScrcpyControlChannel {
@@ -422,12 +521,19 @@ impl super::runtime::SessionChannelTransport for OfficialScrcpyControlChannel {
         match message {
             SessionMessage::StopSession(_) => {
                 let mut client = OfficialScrcpyClient::for_forwarded_local_tcp(self.local_port);
-                client.stop().map(|_| ()).map_err(|error| {
+                let stop_result = client.stop().map(|_| ()).map_err(|error| {
                     HostError::TransportFailure(format!(
                         "route `uitest` phase `grpc-stop` target `{}` method `/ScrcpyService/onEnd` selected_payload `{}` selected_codec=h264: {error}",
                         self.target, self.selected_payload
                     ))
-                })
+                });
+                let cleanup_result = cleanup_uitest_runtime(
+                    &RuntimeHdcBridge::new(),
+                    &self.device_id,
+                    self.local_port,
+                    &self.grpc_socket_name,
+                );
+                stop_result.and(cleanup_result)
             }
             unexpected => Err(HostError::ContractViolation(format!(
                 "route `uitest` official control channel only supports stop_session mapped to ScrcpyService/onEnd, got {unexpected:?}"
@@ -450,13 +556,43 @@ struct OfficialScrcpyVideoChannel {
 
 impl super::runtime::VideoChannelTransport for OfficialScrcpyVideoChannel {
     fn receive_video_ingress(&mut self) -> HostResult<PreparedVideoIngress> {
-        let message = self.stream.next().ok_or_else(|| {
+        let message = match self.stream.next().ok_or_else(|| {
             HostError::TransportFailure(
                 "route `uitest` phase `grpc-stream` official ScrcpyService/onStart stream ended before host stop"
                     .to_string(),
             )
-        })??;
-        self.adapter.ingest_message(message)
+        })? {
+            Ok(message) => message,
+            Err(HostError::ReceiveTimeout(message)) => {
+                return Err(HostError::ReceiveTimeout(message));
+            }
+            Err(error) => return Err(error),
+        };
+        let ingress = self.adapter.ingest_message(message)?;
+        Ok(ingress)
+    }
+}
+
+fn wake_official_scrcpy_display(device_id: &str, selected_payload: &str) {
+    match RuntimeHdcBridge::new().exec_shell(device_id, "power-shell wakeup") {
+        Ok(output) => host_log::debug(
+            "uitest",
+            "official_scrcpy_wakeup",
+            format!(
+                "device={} payload={} result={}",
+                device_id,
+                selected_payload,
+                output.trim()
+            ),
+        ),
+        Err(error) => host_log::warn(
+            "uitest",
+            "official_scrcpy_wakeup_failed",
+            format!(
+                "device={} payload={} error={}",
+                device_id, selected_payload, error
+            ),
+        ),
     }
 }
 
@@ -466,7 +602,7 @@ fn official_h264_descriptor() -> VideoCodecDescriptor {
         encoder_kind: "official-uitest-platform-avc".to_string(),
         max_width: HOST_MAX_WIDTH,
         max_height: HOST_MAX_HEIGHT,
-        max_fps: 60,
+        max_fps: 120,
         bitrate_control: Some("official".to_string()),
     }
 }

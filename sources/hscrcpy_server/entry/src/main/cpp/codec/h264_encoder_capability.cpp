@@ -127,7 +127,7 @@ bool ResolveEncoderConfiguration(
         return false;
     }
 
-    int32_t frame_rate = kDefaultFrameRate;
+    int32_t frame_rate = state.config.max_fps > 0 ? state.config.max_fps : kDefaultFrameRate;
     OH_AVRange frame_rate_range = {};
     OH_AVErrCode frame_range_result =
         OH_AVCapability_GetVideoFrameRateRangeForSize(capability, width, height, &frame_rate_range);
@@ -139,6 +139,9 @@ bool ResolveEncoderConfiguration(
     }
 
     int32_t bitrate = kDefaultBitrate;
+    if (state.config.has_bitrate_kbps && state.config.bitrate_kbps > 0) {
+        bitrate = state.config.bitrate_kbps * 1000;
+    }
     OH_AVRange bitrate_range = {};
     if (OH_AVCapability_GetEncoderBitrateRange(capability, &bitrate_range) == AV_ERR_OK) {
         bitrate = ClampToRange(bitrate, bitrate_range);

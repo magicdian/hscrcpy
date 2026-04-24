@@ -127,6 +127,22 @@ Build an open-source, free, cross-platform HarmonyOS screen mirroring tool inspi
 * `HOScrcpy` exposes both H.264 video stream mode and image-stream mode through a Java SDK, plus control injection and layout inspection.
 * Upstream `scrcpy` itself now supports multiple video codecs such as H.264, H.265, and AV1, and OPUS, AAC, and RAW for audio, but that does not imply HarmonyOS device-side support for all of them.
 
+### 2026-04-24 official `uitest` scrcpy findings
+
+* The current official `uitest` scrcpy route is viable as a bring-up route for live H.264 preview after host-side fixes:
+  * ffplay raw H.264 input must receive `-framerate <selected_fps>`.
+  * H.264 diagnostic recording must stay opt-in because per-access-unit disk writes distort latency measurements.
+  * ffplay startup must preserve decoder configuration NALs (SPS/PPS) before the first IDR instead of dropping all pre-keyframe units.
+* Huawei's official Java `hosScrcpy` API shows the same static-screen weakness on the current device/package combination:
+  * It starts with `-scale 1 -frameRate 120 -bitRate 31457280 -p 5000 -iFrameInterval 2000`.
+  * It sends best-effort `power-shell wakeup`.
+  * It does not automatically call `onRequestIDRFrame`.
+  * Calling `onRequestIDRFrame` during startup can close or restart the active `onStart` stream.
+* Official recorder mode is not a reliable fallback for this device/package combination:
+  * The official `xdevice_devicetest` recorder resources start through `libscreen_recorder.z.so`.
+  * Both `localabstract:screen_record_grpc_socket` and TCP `5001` forwarding branches failed because the recorder process did not remain alive after `uitest start-daemon`.
+* Decision: do not keep spending engineering time on recorder mode or automatic startup IDR requests as the main fix for static-screen first-frame behavior. Keep official scrcpy as the current bring-up route, and prioritize the self-controlled HAP route where capture, encoder cadence, decoder configuration, first IDR, and periodic IDR policy are under project control.
+
 ### Constraints from platform and project
 
 * This repo is greenfield, so we can choose a clean architecture.

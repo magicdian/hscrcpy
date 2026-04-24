@@ -1437,7 +1437,7 @@ core::SessionTransportConfigureResult ConfigureSessionChannel(
     const core::SessionReadyPreview session_ready = BuildSessionReadyPreview(request);
     ready_state.channel_layout = session_ready.channel_layout;
     const core::VideoTransportState video_transport =
-        BuildVideoTransportState(ready_state, session_ready, BuildPipelineStages(request));
+        BuildVideoTransportState(ready_state, session_ready, request, BuildPipelineStages(request));
 
     return {
         ready_state,
