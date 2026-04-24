@@ -233,3 +233,46 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 5: UITest scrcpy projection route
+
+**Date**: 2026-04-24
+**Task**: UITest scrcpy projection route
+**Branch**: `dev`
+
+### Summary
+
+Implemented and archived the host launch readiness work: route abstraction, codec registry, UITest HDC lifecycle, standard tonic/prost official ScrcpyService client, H.264 ingress to renderer/ffplay, diagnostics, docs, and executable backend spec updates. Manual validation confirmed --route uitest --codec h264 displays through ffplay; follow-up performance work remains for UITest startup latency and artifact overhead.
+
+### Main Changes
+
+- Added explicit host route selection with `uitest` as the default route and `hscrcpy-server` as the HAP fallback route.
+- Added a route-neutral codec capability registry and selected H.264 as the current UITest end-to-end target.
+- Implemented official UITest lifecycle support: payload selection, push, stale process cleanup, `uitest start-daemon`, abstract socket forwarding, and cleanup.
+- Replaced the temporary handwritten official gRPC transport with a standard `tonic` + `prost` generated `ScrcpyService` client.
+- Added route-neutral H.264 ingress from official gRPC stream messages into the existing bringup renderer and ffplay stdin preview path.
+- Updated architecture/debug docs, Trellis task records, and backend code-spec guidance for the official UITest gRPC route.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c7a735a` | (see git log) |
+| `aff535f` | (see git log) |
+
+### Testing
+
+- [OK] `cargo fmt --all --check`
+- [OK] `cargo check --workspace --offline`
+- [OK] `cargo test --workspace --offline -- --nocapture`
+- [OK] `git diff --check`
+- [OK] Manual `--route uitest --codec h264` run displayed H.264 frames through ffplay and emitted full diagnostic windows.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

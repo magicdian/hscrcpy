@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 4
+- **Total Sessions**: 5
 - **Last Active**: 2026-04-24
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~235 | Active |
+| `journal-1.md` | ~269 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 5 | 2026-04-24 | UITest scrcpy projection route | `c7a735a`, `aff535f` | `dev` |
 | 4 | 2026-04-24 | Real H.264 bringup and uitest extension findings | `63b0a4a` | `dev` |
 | 3 | 2026-04-24 | Record official hosScrcpy investigation and uitest POC findings | `3439861` | `dev` |
 | 2 | 2026-04-23 | MVP transport runtime bringup | `e06a6ad` | `dev` |
