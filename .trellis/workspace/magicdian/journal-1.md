@@ -318,3 +318,36 @@ Hardened the official uitest H.264 preview route: made H.264 artifacts opt-in, p
 ### Next Steps
 
 - Keep `04-22-hos-scrcpy-brainstorm` active for remaining MVP planning and future HAP/control-route work.
+
+
+## Session 7: H264 startup preview bugfix
+
+**Date**: 2026-04-24
+**Task**: H264 startup preview bugfix
+**Branch**: `dev`
+
+### Summary
+
+Fixed hscrcpy-server H264 startup visibility and static-screen repeat handling, added route diagnostics and documented uitest IDR/snapshot fallback contracts.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `5c33882` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
