@@ -46,8 +46,7 @@
   "pr_url": null,
   "subtasks": [],
   "children": [
-    "04-23-hos-host-launch-readiness",
-    "04-23-hos-real-h264-stream-bringup"
+    "04-23-hos-host-launch-readiness"
   ],
   "parent": null,
   "relatedFiles": [],
