@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 8
+- **Total Sessions**: 9
 - **Last Active**: 2026-04-24
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~386 | Active |
+| `journal-1.md` | ~428 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 9 | 2026-04-24 | Fix UITest startup SIGINT cancellation | `d2b8809`, `c2d8f0e` | `dev` |
 | 8 | 2026-04-24 | Uitest startup snapshot IDR fallback | `6321df4` | `dev` |
 | 7 | 2026-04-24 | H264 startup preview bugfix | `5c33882` | `dev` |
 | 6 | 2026-04-24 | Stabilize uitest H.264 preview pipeline | `0804bda` | `dev` |

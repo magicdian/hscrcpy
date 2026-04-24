@@ -332,7 +332,10 @@ Fixed hscrcpy-server H264 startup visibility and static-screen repeat handling, 
 
 ### Main Changes
 
-(Add details)
+- Captured the host streaming cancellation contract in backend code-specs, including `CancellationToken`, `SessionOrchestrator::start_with_cancellation`, `OfficialScrcpyClient::start_with_cancellation`, and `HostError::ShutdownRequested`.
+- Added portable cancellation support to official `uitest` startup so `/ScrcpyService/onStart` is polled with a 100ms cancellation check instead of blocking until the first stream payload.
+- Routed CLI SIGINT through the host cancellation API and report startup cancellation as a graceful stop instead of a startup failure.
+- Added regression coverage for cancellation before gRPC connect and cancellation after `uitest` route launch.
 
 ### Git Commits
 
@@ -384,6 +387,44 @@ Added an opt-in uitest startup snapshot fallback that captures a pre-stream scre
 - [OK] `cargo test --workspace --offline -- --nocapture`
 - [OK] `git diff --check`
 - [OK] Real-device manual validation: `ffplay` displayed the startup snapshot before visible screen changes; after screen movement, the official uitest stream took over with only a mild stall and no visible corruption.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 9: Fix UITest startup SIGINT cancellation
+
+**Date**: 2026-04-24
+**Task**: Fix UITest startup SIGINT cancellation
+**Branch**: `dev`
+
+### Summary
+
+Documented and implemented portable host startup cancellation so Ctrl+C during official uitest grpc-start exits promptly, cleans route state, and no longer waits for first H.264/IDR payload. Added host cancellation API, ShutdownRequested error, cancellation-aware ScrcpyService/onStart polling, CLI graceful startup cancellation handling, and regression tests.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `d2b8809` | docs: capture host streaming cancellation contract |
+| `c2d8f0e` | fix(host): cancel uitest startup on sigint |
+
+### Testing
+
+- [OK] `cargo fmt --check`
+- [OK] `cargo check -p hscrcpy-host-cli`
+- [OK] `cargo test -p hscrcpy-host` (96 tests)
+- [OK] Manual real-device repeated Ctrl+C checks during `uitest` startup snapshot route: startup exits promptly with `received SIGINT; startup cancelled gracefully: host shutdown requested during grpc-start ...`.
+- [OK] Manual capture-phase Ctrl+C check after stream starts: session stops gracefully and prints partial diagnostics.
 
 ### Status
 
