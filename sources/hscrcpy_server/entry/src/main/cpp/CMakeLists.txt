@@ -16,6 +16,9 @@ set(ENTRY_NATIVE_SOURCES
     bridge/napi_init.cpp
     bridge/companion_napi.cpp
     bridge/napi_helpers.cpp
+    capture/screen_capture_authorization_probe.cpp
+    capture/h264_screen_capture_source.cpp
+    codec/h264_encoder_capability.cpp
     control/control_message_handler.cpp
     control/input_injector.cpp
     core/companion_core.cpp
@@ -28,4 +31,38 @@ set(ENTRY_NATIVE_SOURCES
 )
 
 add_library(entry SHARED ${ENTRY_NATIVE_SOURCES})
-target_link_libraries(entry PUBLIC libace_napi.z.so Threads::Threads)
+target_link_libraries(
+    entry
+    PUBLIC
+    libace_napi.z.so
+    libhilog_ndk.z.so
+    libnative_avscreen_capture.so
+    libnative_media_codecbase.so
+    libnative_media_core.so
+    libnative_media_venc.so
+    libnative_window.so
+    Threads::Threads
+)
+
+set(UITEST_EXTENSION_POC_SOURCES
+    capture/screen_capture_authorization_probe.cpp
+    codec/h264_encoder_capability.cpp
+    poc/uitest_extension_poc.cpp
+)
+
+add_library(hscrcpy_uitest_poc SHARED ${UITEST_EXTENSION_POC_SOURCES})
+set_target_properties(
+    hscrcpy_uitest_poc
+    PROPERTIES
+    PREFIX ""
+    OUTPUT_NAME "hscrcpy_uitest_poc"
+)
+target_link_libraries(
+    hscrcpy_uitest_poc
+    PUBLIC
+    libhilog_ndk.z.so
+    libnative_avscreen_capture.so
+    libnative_media_codecbase.so
+    libnative_media_core.so
+    Threads::Threads
+)

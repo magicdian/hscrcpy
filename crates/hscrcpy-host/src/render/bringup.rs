@@ -5,8 +5,26 @@ use hscrcpy_contracts::VideoCodec;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::time::{Duration, Instant};
 
 const H264_ANNEX_B_START_CODE: [u8; 4] = [0, 0, 0, 1];
+const DEFAULT_FFPLAY_BIN: &str = "ffplay";
+const H264_DIAGNOSTIC_SUMMARY_INTERVAL: usize = 120;
+const H264_LIVE_PREVIEW_WRITE_WARN_US: u64 = 20_000;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct H264LivePreviewConfig {
+    pub ffplay_bin: String,
+}
+
+impl Default for H264LivePreviewConfig {
+    fn default() -> Self {
+        Self {
+            ffplay_bin: DEFAULT_FFPLAY_BIN.to_string(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderSessionDescriptor {
@@ -33,12 +51,88 @@ pub struct RenderedArtifact {
     pub artifact_path: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct IngressTimingSample {
+    receive_started_at: Instant,
+    receive_completed_at: Instant,
+}
+
+impl IngressTimingSample {
+    pub fn new(receive_started_at: Instant, receive_completed_at: Instant) -> Self {
+        Self {
+            receive_started_at,
+            receive_completed_at,
+        }
+    }
+
+    fn receive_wait_duration(&self) -> Duration {
+        self.receive_completed_at
+            .saturating_duration_since(self.receive_started_at)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BringupDiagnosticsSummary {
+    pub units: usize,
+    pub first_frame_index: usize,
+    pub last_frame_index: usize,
+    pub full_window: bool,
+    pub pts_span_us: Option<u64>,
+    pub host_receive_span_us: Option<u64>,
+    pub host_present_span_us: Option<u64>,
+    pub host_receive_minus_pts_us: Option<i128>,
+    pub host_present_minus_pts_us: Option<i128>,
+    pub ingress_wait_avg_us: Option<u64>,
+    pub ingress_wait_max_us: Option<u64>,
+    pub present_avg_us: u64,
+    pub present_max_us: u64,
+    pub ffplay_write_samples: usize,
+    pub ffplay_write_avg_us: Option<u64>,
+    pub ffplay_write_max_us: Option<u64>,
+    pub ffplay_slow_writes: usize,
+    pub ffplay_slow_threshold_us: u64,
+}
+
+impl BringupDiagnosticsSummary {
+    fn event_line(&self) -> String {
+        let format_u64 =
+            |value: Option<u64>| value.map_or_else(|| "na".to_string(), |raw| raw.to_string());
+        let format_i128 =
+            |value: Option<i128>| value.map_or_else(|| "na".to_string(), |raw| raw.to_string());
+        format!(
+            "diag window={} units={} frame_start={} frame_end={} codec=h264 pts_span_us={} host_rx_span_us={} host_present_span_us={} host_rx_minus_pts_us={} host_present_minus_pts_us={} ingress_wait_avg_us={} ingress_wait_max_us={} present_avg_us={} present_max_us={} ffplay_write_samples={} ffplay_write_avg_us={} ffplay_write_max_us={} ffplay_slow_writes={} ffplay_slow_threshold_us={}",
+            if self.full_window { "full" } else { "partial" },
+            self.units,
+            self.first_frame_index,
+            self.last_frame_index,
+            format_u64(self.pts_span_us),
+            format_u64(self.host_receive_span_us),
+            format_u64(self.host_present_span_us),
+            format_i128(self.host_receive_minus_pts_us),
+            format_i128(self.host_present_minus_pts_us),
+            format_u64(self.ingress_wait_avg_us),
+            format_u64(self.ingress_wait_max_us),
+            self.present_avg_us,
+            self.present_max_us,
+            self.ffplay_write_samples,
+            format_u64(self.ffplay_write_avg_us),
+            format_u64(self.ffplay_write_max_us),
+            self.ffplay_slow_writes,
+            self.ffplay_slow_threshold_us,
+        )
+    }
+}
+
 pub struct BringupRenderSurface {
     output_root: PathBuf,
     session: Option<RenderSessionDescriptor>,
     session_dir: Option<PathBuf>,
     frames_dir: Option<PathBuf>,
+    h264_live_preview_config: Option<H264LivePreviewConfig>,
+    h264_live_preview: Option<H264LivePreview>,
+    live_preview_status: Option<String>,
+    h264_diagnostics: H264DiagnosticState,
+    pending_h264_diagnostic_summary: Option<BringupDiagnosticsSummary>,
     stats: RenderStreamStats,
 }
 
@@ -49,8 +143,18 @@ impl BringupRenderSurface {
             session: None,
             session_dir: None,
             frames_dir: None,
+            h264_live_preview_config: None,
+            h264_live_preview: None,
+            live_preview_status: None,
+            h264_diagnostics: H264DiagnosticState::default(),
+            pending_h264_diagnostic_summary: None,
             stats: RenderStreamStats::default(),
         }
+    }
+
+    pub fn with_h264_live_preview(mut self, config: H264LivePreviewConfig) -> Self {
+        self.h264_live_preview_config = Some(config);
+        self
     }
 
     pub fn initialize_session(&mut self, session: RenderSessionDescriptor) -> HostResult<()> {
@@ -58,20 +162,55 @@ impl BringupRenderSurface {
         let frames_dir = session_dir.join("frames");
         fs::create_dir_all(&frames_dir)
             .map_err(|error| io_error("create render output directories", &frames_dir, error))?;
-        write_text_file(
-            &session_dir.join("session.txt"),
-            &render_session_report(&session),
-        )?;
-        write_text_file(
-            &session_dir.join("preview.html"),
-            &render_preview_html(&session),
-        )?;
         write_text_file(&session_dir.join("events.log"), "")?;
 
         self.stats = RenderStreamStats::default();
-        self.session = Some(session);
-        self.session_dir = Some(session_dir);
-        self.frames_dir = Some(frames_dir);
+        self.h264_diagnostics = H264DiagnosticState::default();
+        self.pending_h264_diagnostic_summary = None;
+        self.session = Some(session.clone());
+        self.session_dir = Some(session_dir.clone());
+        self.frames_dir = Some(frames_dir.clone());
+
+        self.h264_live_preview = None;
+        self.live_preview_status = None;
+        if session.selected_codec == VideoCodec::H264 {
+            self.append_event_note(&format!(
+                "diag_config codec=h264 summary_interval_units={} ffplay_slow_write_us={}",
+                H264_DIAGNOSTIC_SUMMARY_INTERVAL, H264_LIVE_PREVIEW_WRITE_WARN_US
+            ))?;
+            if let Some(config) = &self.h264_live_preview_config {
+                match H264LivePreview::spawn(config, &session_dir, &session) {
+                    Ok(preview) => {
+                        self.live_preview_status =
+                            Some(format!("active via {}", preview.command_path()));
+                        self.append_event_note(&format!(
+                            "live_preview status=active backend=ffplay command={}",
+                            preview.command_path()
+                        ))?;
+                        self.h264_live_preview = Some(preview);
+                    }
+                    Err(error) => {
+                        let status = format!("disabled: {error}");
+                        self.live_preview_status = Some(status.clone());
+                        self.append_event_note(&format!(
+                            "live_preview status=disabled reason={error}"
+                        ))?;
+                    }
+                }
+            } else {
+                self.live_preview_status = Some("disabled by host configuration".to_string());
+            }
+        }
+
+        write_text_file(
+            &session_dir.join("session.txt"),
+            &render_session_report(&session, self.live_preview_status.as_deref()),
+        )?;
+        write_text_file(
+            &session_dir.join("preview.html"),
+            &render_preview_html(&session, self.live_preview_status.as_deref()),
+        )?;
+
         Ok(())
     }
 
@@ -85,6 +224,10 @@ impl BringupRenderSurface {
         self.session_dir.as_deref()
     }
 
+    pub fn live_preview_status(&self) -> Option<&str> {
+        self.live_preview_status.as_deref()
+    }
+
     pub fn stats(&self) -> &RenderStreamStats {
         &self.stats
     }
@@ -93,8 +236,41 @@ impl BringupRenderSurface {
         &mut self,
         ingress: &PreparedVideoIngress,
     ) -> HostResult<RenderedArtifact> {
+        self.present_video_ingress_internal(ingress, None)
+    }
+
+    pub fn present_video_ingress_with_timing(
+        &mut self,
+        ingress: &PreparedVideoIngress,
+        timing: IngressTimingSample,
+    ) -> HostResult<RenderedArtifact> {
+        self.present_video_ingress_internal(ingress, Some(timing))
+    }
+
+    pub fn take_h264_diagnostic_summary(&mut self) -> Option<BringupDiagnosticsSummary> {
+        self.pending_h264_diagnostic_summary.take()
+    }
+
+    pub fn flush_h264_diagnostic_summary(
+        &mut self,
+    ) -> HostResult<Option<BringupDiagnosticsSummary>> {
+        let Some(summary) = self.h264_diagnostics.flush_partial_window() else {
+            return Ok(None);
+        };
+        self.append_event_note(&summary.event_line())?;
+        self.pending_h264_diagnostic_summary = Some(summary.clone());
+        Ok(Some(summary))
+    }
+
+    fn present_video_ingress_internal(
+        &mut self,
+        ingress: &PreparedVideoIngress,
+        timing: Option<IngressTimingSample>,
+    ) -> HostResult<RenderedArtifact> {
         match ingress {
-            PreparedVideoIngress::H264(access_unit) => self.present_h264_access_unit(access_unit),
+            PreparedVideoIngress::H264(access_unit) => {
+                self.present_h264_access_unit(access_unit, timing)
+            }
             PreparedVideoIngress::Jpeg(frame) => self.write_jpeg_frame(frame),
             PreparedVideoIngress::DeferredExperimental(packet) => {
                 Err(HostError::RenderFailure(format!(
@@ -108,9 +284,12 @@ impl BringupRenderSurface {
     fn present_h264_access_unit(
         &mut self,
         access_unit: &H264AccessUnit,
+        timing: Option<IngressTimingSample>,
     ) -> HostResult<RenderedArtifact> {
-        let session_dir = self.require_session_dir()?;
         let frame_index = self.stats.total_units + 1;
+        let present_started_at = Instant::now();
+
+        let session_dir = self.require_session_dir()?;
         let frame_path = self
             .require_frames_dir()?
             .join(format!("frame-{frame_index:06}.h264"));
@@ -127,6 +306,26 @@ impl BringupRenderSurface {
             .write_all(&H264_ANNEX_B_START_CODE)
             .and_then(|_| stream.write_all(&access_unit.encoded_bytes))
             .map_err(|error| io_error("append h264 access unit", &stream_path, error))?;
+
+        let preview_result = self.feed_live_preview(access_unit)?;
+        if let Some(error) = preview_result.error.as_deref() {
+            self.live_preview_status = Some(format!("disabled: {error}"));
+            self.append_event_note(&format!("live_preview status=disabled reason={error}"))?;
+        }
+
+        let present_elapsed = present_started_at.elapsed();
+        let present_completed_at = Instant::now();
+        if let Some(summary) = self.h264_diagnostics.record_frame(
+            frame_index,
+            access_unit.timestamp_micros,
+            timing,
+            present_completed_at,
+            present_elapsed,
+            preview_result.write_duration_us,
+        ) {
+            self.append_event_note(&summary.event_line())?;
+            self.pending_h264_diagnostic_summary = Some(summary);
+        }
 
         self.record_artifact(
             frame_index,
@@ -171,6 +370,28 @@ impl BringupRenderSurface {
         })
     }
 
+    fn feed_live_preview(
+        &mut self,
+        access_unit: &H264AccessUnit,
+    ) -> HostResult<H264LivePreviewResult> {
+        let Some(preview) = self.h264_live_preview.as_mut() else {
+            return Ok(H264LivePreviewResult::default());
+        };
+        match preview.present_access_unit(access_unit) {
+            Ok(metrics) => Ok(H264LivePreviewResult {
+                write_duration_us: Some(metrics.write_duration_us),
+                error: None,
+            }),
+            Err(error) => {
+                self.h264_live_preview = None;
+                Ok(H264LivePreviewResult {
+                    write_duration_us: None,
+                    error: Some(error.to_string()),
+                })
+            }
+        }
+    }
+
     fn record_artifact(
         &mut self,
         frame_index: usize,
@@ -200,6 +421,26 @@ impl BringupRenderSurface {
         Ok(())
     }
 
+    fn append_event_note(&self, note: &str) -> HostResult<()> {
+        let event_path = self
+            .session_dir
+            .as_ref()
+            .map(|dir| dir.join("events.log"))
+            .ok_or_else(|| {
+                HostError::RenderFailure(
+                    "render surface must be initialized before appending event notes".to_string(),
+                )
+            })?;
+        let mut log = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&event_path)
+            .map_err(|error| io_error("open render event log", &event_path, error))?;
+        writeln!(log, "{note}")
+            .map_err(|error| io_error("append render event note", &event_path, error))?;
+        Ok(())
+    }
+
     fn require_session_dir(&self) -> HostResult<&Path> {
         self.session_dir.as_deref().ok_or_else(|| {
             HostError::RenderFailure(
@@ -218,29 +459,345 @@ impl BringupRenderSurface {
     }
 }
 
+struct H264LivePreview {
+    command_path: String,
+    child: Child,
+    stdin: Option<ChildStdin>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct H264LivePreviewMetrics {
+    write_duration_us: u64,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct H264LivePreviewResult {
+    write_duration_us: Option<u64>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct H264DiagnosticState {
+    window: H264DiagnosticWindow,
+}
+
+#[derive(Debug, Default)]
+struct H264DiagnosticWindow {
+    units: usize,
+    first_frame_index: Option<usize>,
+    last_frame_index: Option<usize>,
+    first_pts_us: Option<u64>,
+    last_pts_us: Option<u64>,
+    first_host_receive_at: Option<Instant>,
+    last_host_receive_at: Option<Instant>,
+    first_host_present_at: Option<Instant>,
+    last_host_present_at: Option<Instant>,
+    ingress_wait_total_us: u128,
+    ingress_wait_max_us: u64,
+    ingress_wait_samples: usize,
+    present_total_us: u128,
+    present_max_us: u64,
+    ffplay_write_total_us: u128,
+    ffplay_write_max_us: u64,
+    ffplay_write_samples: usize,
+    ffplay_slow_writes: usize,
+}
+
+impl H264DiagnosticState {
+    fn record_frame(
+        &mut self,
+        frame_index: usize,
+        pts_us: u64,
+        timing: Option<IngressTimingSample>,
+        present_completed_at: Instant,
+        present_elapsed: Duration,
+        ffplay_write_us: Option<u64>,
+    ) -> Option<BringupDiagnosticsSummary> {
+        self.window.record_frame(
+            frame_index,
+            pts_us,
+            timing,
+            present_completed_at,
+            present_elapsed,
+            ffplay_write_us,
+        );
+        if self.window.units >= H264_DIAGNOSTIC_SUMMARY_INTERVAL {
+            return self.flush_window(true);
+        }
+        None
+    }
+
+    fn flush_partial_window(&mut self) -> Option<BringupDiagnosticsSummary> {
+        self.flush_window(false)
+    }
+
+    fn flush_window(&mut self, full_window: bool) -> Option<BringupDiagnosticsSummary> {
+        let summary = self.window.build_summary(full_window)?;
+        self.window = H264DiagnosticWindow::default();
+        Some(summary)
+    }
+}
+
+impl H264DiagnosticWindow {
+    fn record_frame(
+        &mut self,
+        frame_index: usize,
+        pts_us: u64,
+        timing: Option<IngressTimingSample>,
+        present_completed_at: Instant,
+        present_elapsed: Duration,
+        ffplay_write_us: Option<u64>,
+    ) {
+        self.units += 1;
+        self.last_frame_index = Some(frame_index);
+        if self.first_frame_index.is_none() {
+            self.first_frame_index = Some(frame_index);
+        }
+        self.last_pts_us = Some(pts_us);
+        if self.first_pts_us.is_none() {
+            self.first_pts_us = Some(pts_us);
+        }
+
+        if let Some(sample) = timing {
+            self.last_host_receive_at = Some(sample.receive_completed_at);
+            if self.first_host_receive_at.is_none() {
+                self.first_host_receive_at = Some(sample.receive_completed_at);
+            }
+
+            let ingress_wait_us = duration_to_u64_micros(sample.receive_wait_duration());
+            self.ingress_wait_total_us = self
+                .ingress_wait_total_us
+                .saturating_add(u128::from(ingress_wait_us));
+            self.ingress_wait_max_us = self.ingress_wait_max_us.max(ingress_wait_us);
+            self.ingress_wait_samples += 1;
+        }
+
+        self.last_host_present_at = Some(present_completed_at);
+        if self.first_host_present_at.is_none() {
+            self.first_host_present_at = Some(present_completed_at);
+        }
+        let present_elapsed_us = duration_to_u64_micros(present_elapsed);
+        self.present_total_us = self
+            .present_total_us
+            .saturating_add(u128::from(present_elapsed_us));
+        self.present_max_us = self.present_max_us.max(present_elapsed_us);
+
+        if let Some(write_us) = ffplay_write_us {
+            self.ffplay_write_total_us = self
+                .ffplay_write_total_us
+                .saturating_add(u128::from(write_us));
+            self.ffplay_write_max_us = self.ffplay_write_max_us.max(write_us);
+            self.ffplay_write_samples += 1;
+            if write_us >= H264_LIVE_PREVIEW_WRITE_WARN_US {
+                self.ffplay_slow_writes += 1;
+            }
+        }
+    }
+
+    fn build_summary(&self, full_window: bool) -> Option<BringupDiagnosticsSummary> {
+        let first_frame_index = self.first_frame_index?;
+        let last_frame_index = self.last_frame_index?;
+        let pts_span_us = span_u64(self.first_pts_us, self.last_pts_us);
+        let host_receive_span_us =
+            span_instant_us(self.first_host_receive_at, self.last_host_receive_at);
+        let host_present_span_us =
+            span_instant_us(self.first_host_present_at, self.last_host_present_at);
+        let host_receive_minus_pts_us = subtract_span(host_receive_span_us, pts_span_us);
+        let host_present_minus_pts_us = subtract_span(host_present_span_us, pts_span_us);
+
+        Some(BringupDiagnosticsSummary {
+            units: self.units,
+            first_frame_index,
+            last_frame_index,
+            full_window,
+            pts_span_us,
+            host_receive_span_us,
+            host_present_span_us,
+            host_receive_minus_pts_us,
+            host_present_minus_pts_us,
+            ingress_wait_avg_us: average_u128_to_u64(
+                self.ingress_wait_total_us,
+                self.ingress_wait_samples,
+            ),
+            ingress_wait_max_us: if self.ingress_wait_samples > 0 {
+                Some(self.ingress_wait_max_us)
+            } else {
+                None
+            },
+            present_avg_us: average_u128_to_u64(self.present_total_us, self.units).unwrap_or(0),
+            present_max_us: self.present_max_us,
+            ffplay_write_samples: self.ffplay_write_samples,
+            ffplay_write_avg_us: average_u128_to_u64(
+                self.ffplay_write_total_us,
+                self.ffplay_write_samples,
+            ),
+            ffplay_write_max_us: if self.ffplay_write_samples > 0 {
+                Some(self.ffplay_write_max_us)
+            } else {
+                None
+            },
+            ffplay_slow_writes: self.ffplay_slow_writes,
+            ffplay_slow_threshold_us: H264_LIVE_PREVIEW_WRITE_WARN_US,
+        })
+    }
+}
+
+impl H264LivePreview {
+    fn spawn(
+        config: &H264LivePreviewConfig,
+        session_dir: &Path,
+        session: &RenderSessionDescriptor,
+    ) -> HostResult<Self> {
+        let log_path = session_dir.join("live-preview.log");
+        let log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .map_err(|error| io_error("open live preview log", &log_path, error))?;
+        let log_file_err = log_file
+            .try_clone()
+            .map_err(|error| io_error("clone live preview log handle", &log_path, error))?;
+
+        let mut child = Command::new(&config.ffplay_bin)
+            .arg("-loglevel")
+            .arg("warning")
+            .arg("-fflags")
+            .arg("nobuffer")
+            .arg("-flags")
+            .arg("low_delay")
+            .arg("-framedrop")
+            .arg("-window_title")
+            .arg(format!("hscrcpy {}", session.session_id))
+            .arg("-f")
+            .arg("h264")
+            .arg("-i")
+            .arg("pipe:0")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::from(log_file))
+            .stderr(Stdio::from(log_file_err))
+            .spawn()
+            .map_err(|error| {
+                HostError::RenderFailure(format!(
+                    "spawn live preview command `{}` failed: {error}",
+                    config.ffplay_bin
+                ))
+            })?;
+        let stdin = child.stdin.take().ok_or_else(|| {
+            HostError::RenderFailure(format!(
+                "live preview command `{}` did not expose stdin",
+                config.ffplay_bin
+            ))
+        })?;
+
+        Ok(Self {
+            command_path: config.ffplay_bin.clone(),
+            child,
+            stdin: Some(stdin),
+        })
+    }
+
+    fn command_path(&self) -> &str {
+        &self.command_path
+    }
+
+    fn present_access_unit(
+        &mut self,
+        access_unit: &H264AccessUnit,
+    ) -> HostResult<H264LivePreviewMetrics> {
+        let stdin = self.stdin.as_mut().ok_or_else(|| {
+            HostError::RenderFailure(format!(
+                "live preview command `{}` stdin is unavailable",
+                self.command_path
+            ))
+        })?;
+        let write_started_at = Instant::now();
+        stdin
+            .write_all(&access_unit.encoded_bytes)
+            .and_then(|_| stdin.flush())
+            .map_err(|error| {
+                HostError::RenderFailure(format!(
+                    "write h264 access unit into live preview command `{}` failed: {error}",
+                    self.command_path
+                ))
+            })?;
+        Ok(H264LivePreviewMetrics {
+            write_duration_us: duration_to_u64_micros(write_started_at.elapsed()),
+        })
+    }
+}
+
+impl Drop for H264LivePreview {
+    fn drop(&mut self) {
+        drop(self.stdin.take());
+        match self.child.try_wait() {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+            }
+            Err(_) => {}
+        }
+    }
+}
+
 impl JpegFrameSink for BringupRenderSurface {
     fn present_jpeg_frame(&mut self, frame: &JpegFrame) -> HostResult<()> {
         self.write_jpeg_frame(frame).map(|_| ())
     }
 }
 
-fn render_session_report(session: &RenderSessionDescriptor) -> String {
+fn span_u64(start: Option<u64>, end: Option<u64>) -> Option<u64> {
+    start.zip(end).map(|(a, b)| b.saturating_sub(a))
+}
+
+fn span_instant_us(start: Option<Instant>, end: Option<Instant>) -> Option<u64> {
+    start
+        .zip(end)
+        .map(|(a, b)| duration_to_u64_micros(b.saturating_duration_since(a)))
+}
+
+fn subtract_span(lhs: Option<u64>, rhs: Option<u64>) -> Option<i128> {
+    let lhs = lhs?;
+    let rhs = rhs?;
+    Some(i128::from(lhs) - i128::from(rhs))
+}
+
+fn average_u128_to_u64(total: u128, count: usize) -> Option<u64> {
+    if count == 0 {
+        return None;
+    }
+    u64::try_from(total / count as u128).ok().or(Some(u64::MAX))
+}
+
+fn duration_to_u64_micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).ok().unwrap_or(u64::MAX)
+}
+
+fn render_session_report(
+    session: &RenderSessionDescriptor,
+    live_preview_status: Option<&str>,
+) -> String {
     format!(
-        "session_id={}\nselected_codec={}\ndisplay_width={}\ndisplay_height={}\npreview_html=preview.html\njpeg_latest=latest.jpg\nh264_stream=stream.h264\n",
+        "session_id={}\nselected_codec={}\ndisplay_width={}\ndisplay_height={}\npreview_html=preview.html\njpeg_latest=latest.jpg\nh264_stream=stream.h264\nlive_preview={}\n",
         session.session_id,
         codec_name(&session.selected_codec),
         session.display_width,
         session.display_height,
+        live_preview_status.unwrap_or("not_configured"),
     )
 }
 
-fn render_preview_html(session: &RenderSessionDescriptor) -> String {
+fn render_preview_html(
+    session: &RenderSessionDescriptor,
+    live_preview_status: Option<&str>,
+) -> String {
     format!(
-        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta http-equiv=\"refresh\" content=\"1\">\n<title>hscrcpy Render Bringup</title>\n<style>\nbody {{ font-family: ui-monospace, monospace; margin: 24px; background: #111; color: #f5f5f5; }}\nmain {{ max-width: 960px; margin: 0 auto; }}\nimg {{ width: 100%; max-width: 100%; border: 1px solid #444; background: #000; }}\np {{ line-height: 1.5; }}\ncode {{ color: #8be9fd; }}\n</style>\n</head>\n<body>\n<main>\n<h1>hscrcpy host render bringup</h1>\n<p>Session: <code>{}</code></p>\n<p>Negotiated codec: <code>{}</code></p>\n<p>Display hint: <code>{}x{}</code></p>\n<p>This preview auto-refreshes once per second. JPEG fallback updates <code>latest.jpg</code> directly. H264 mainline writes per-access-unit artifacts under <code>frames/</code> and appends an Annex-B-style stream to <code>stream.h264</code> for decoder bringup.</p>\n<img src=\"latest.jpg\" alt=\"Waiting for JPEG fallback frame\">\n</main>\n</body>\n</html>\n",
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta http-equiv=\"refresh\" content=\"1\">\n<title>hscrcpy Render Bringup</title>\n<style>\nbody {{ font-family: ui-monospace, monospace; margin: 24px; background: #111; color: #f5f5f5; }}\nmain {{ max-width: 960px; margin: 0 auto; }}\nimg {{ width: 100%; max-width: 100%; border: 1px solid #444; background: #000; }}\np {{ line-height: 1.5; }}\ncode {{ color: #8be9fd; }}\n</style>\n</head>\n<body>\n<main>\n<h1>hscrcpy host render bringup</h1>\n<p>Session: <code>{}</code></p>\n<p>Negotiated codec: <code>{}</code></p>\n<p>Display hint: <code>{}x{}</code></p>\n<p>Live preview: <code>{}</code></p>\n<p>This preview auto-refreshes once per second. JPEG fallback updates <code>latest.jpg</code> directly. H264 mainline writes per-access-unit artifacts under <code>frames/</code>, appends an Annex-B-style stream to <code>stream.h264</code>, and may also feed a realtime ffplay preview when available.</p>\n<img src=\"latest.jpg\" alt=\"Waiting for JPEG fallback frame\">\n</main>\n</body>\n</html>\n",
         session.session_id,
         codec_name(&session.selected_codec),
         session.display_width,
         session.display_height,
+        live_preview_status.unwrap_or("not_configured"),
     )
 }
 
@@ -262,13 +819,13 @@ fn codec_name(codec: &VideoCodec) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{BringupRenderSurface, RenderSessionDescriptor};
+    use super::{BringupRenderSurface, IngressTimingSample, RenderSessionDescriptor};
     use crate::render::JpegFrame;
     use crate::video::{h264::H264AccessUnit, PreparedVideoIngress};
     use hscrcpy_contracts::VideoCodec;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     struct TestDir {
         path: PathBuf,
@@ -364,6 +921,57 @@ mod tests {
         assert_eq!(
             fs::read(session_dir.join("stream.h264")).expect("stream artifact should exist"),
             vec![0, 0, 0, 1, 1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn flushes_h264_timing_summary_with_ingress_samples() {
+        let temp = TestDir::new("h264-diag");
+        let mut surface = BringupRenderSurface::new(temp.path());
+        surface
+            .initialize_session(session(VideoCodec::H264))
+            .expect("render surface should initialize");
+
+        let base = Instant::now();
+        for index in 0..3_u64 {
+            let receive_started_at = base + Duration::from_millis(index * 16);
+            let receive_completed_at = receive_started_at + Duration::from_micros(700);
+            surface
+                .present_video_ingress_with_timing(
+                    &PreparedVideoIngress::H264(H264AccessUnit {
+                        timestamp_micros: 1_000_000 + index * 16_000,
+                        is_keyframe: index == 0,
+                        encoded_bytes: vec![1, 2, 3, 4],
+                    }),
+                    IngressTimingSample::new(receive_started_at, receive_completed_at),
+                )
+                .expect("timed h264 access unit should render");
+        }
+
+        let summary = surface
+            .flush_h264_diagnostic_summary()
+            .expect("summary flush should succeed")
+            .expect("summary should be produced");
+
+        assert_eq!(summary.units, 3);
+        assert_eq!(summary.full_window, false);
+        assert_eq!(summary.pts_span_us, Some(32_000));
+        assert_eq!(summary.ingress_wait_avg_us, Some(700));
+        assert_eq!(summary.ingress_wait_max_us, Some(700));
+        assert!(summary.host_receive_span_us.is_some());
+        assert!(summary.host_present_span_us.is_some());
+
+        let pending = surface
+            .take_h264_diagnostic_summary()
+            .expect("pending summary should be available");
+        assert_eq!(pending.units, 3);
+
+        let session_dir = surface.session_dir().expect("session dir should exist");
+        assert!(
+            fs::read_to_string(session_dir.join("events.log"))
+                .expect("events log should exist")
+                .contains("diag window=partial"),
+            "events.log should include structured summary line"
         );
     }
 

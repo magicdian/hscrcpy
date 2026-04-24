@@ -94,7 +94,8 @@ CompanionDescriptor BuildCompanionDescriptor()
     };
     descriptor.planned_modules = {
         "bridge",
-        "capture/display_capture",
+        "capture/h264_screen_capture_source",
+        "codec/h264_encoder_capability",
         "control/control_message_handler",
         "control/input_injector",
         "video/h264_video_path",

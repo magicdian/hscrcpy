@@ -27,6 +27,7 @@ This repo is early-stage, so discipline matters more than completeness. New back
 * Add comments only where control flow or OS constraints are non-obvious
 * Prefer explicit capability negotiation over hard-coded assumptions
 * Update specs when a new architectural pattern is introduced
+* Keep experiment-only native paths explicitly isolated from production runtime targets
 
 ---
 
@@ -68,3 +69,4 @@ Minimum expectation for new backend work:
 * Shipping template code unchanged.
 * Growing the native bridge before defining the native core API.
 * Delaying basic tests until after protocol complexity appears.
+* Treating `uitest` extension experiments as production-ready before the device proves the load/trust path.

@@ -1027,7 +1027,12 @@ mod tests {
 
     #[test]
     fn decodes_provisional_video_packet_into_h264_ingress() {
-        let payload = encode_video_packet(&VideoCodec::H264, 444, true, &[1, 2, 3, 4]);
+        let payload = encode_video_packet(
+            &VideoCodec::H264,
+            444,
+            true,
+            &[0, 0, 1, 0x67, 0x42, 0x00, 0x1f, 0, 0, 1, 0x65, 0x88, 0x84],
+        );
         let packet =
             VideoTransportPacket::decode(&payload).expect("provisional packet should decode");
         let ingress =
@@ -1037,7 +1042,10 @@ mod tests {
             PreparedVideoIngress::H264(access_unit) => {
                 assert_eq!(access_unit.timestamp_micros, 444);
                 assert!(access_unit.is_keyframe);
-                assert_eq!(access_unit.encoded_bytes, vec![1, 2, 3, 4]);
+                assert_eq!(
+                    access_unit.encoded_bytes,
+                    vec![0, 0, 1, 0x67, 0x42, 0x00, 0x1f, 0, 0, 1, 0x65, 0x88, 0x84]
+                );
             }
             unexpected => panic!("unexpected ingress: {unexpected:?}"),
         }

@@ -14,7 +14,6 @@ core::DisplayInfo ResolveSessionDisplay(const core::SessionConfigRequest &reques
 core::ChannelLayout BuildChannelLayout();
 core::VideoUnitPreview BuildVideoUnitPreview();
 std::vector<std::string> BuildPipelineStages();
-const std::vector<uint8_t> &GetPlaceholderH264AccessUnitBytes();
 
 }  // namespace h264
 }  // namespace video

@@ -753,6 +753,91 @@ mod tests {
     }
 
     #[test]
+    fn startup_rejects_non_annex_b_h264_payloads_on_video_ingress() {
+        let orchestrator = SessionOrchestrator::with_transport(
+            TestHdcBridge {
+                forwarded_ports: Rc::new(RefCell::new(Vec::new())),
+            },
+            TestCompanionManager::default(),
+            TestTransportFactory {
+                session_messages: Rc::new(RefCell::new(Some(VecDeque::from(vec![
+                    Ok(InboundSessionMessage::DeviceHello(DeviceHello {
+                        session_id: build_session_id("usb-device-001"),
+                        protocol_major: 1,
+                        protocol_minor: 0,
+                        companion_version: "1.0.0".to_string(),
+                        device_name: "Harmony Device".to_string(),
+                        authorization: FeatureAuthorization {
+                            video_capture: AuthorizationState::Granted,
+                            input_injection: AuthorizationState::Granted,
+                        },
+                        available_features: vec![SessionFeature::Video],
+                        available_video_codecs: vec![VideoCodecDescriptor {
+                            codec: VideoCodec::H264,
+                            encoder_kind: "hardware".to_string(),
+                            max_width: 1920,
+                            max_height: 1080,
+                            max_fps: 60,
+                            bitrate_control: Some("vbr".to_string()),
+                        }],
+                        display: DisplayInfo {
+                            width: 1920,
+                            height: 1080,
+                            rotation: 0,
+                        },
+                    })),
+                    Ok(InboundSessionMessage::SessionReady(SessionReady {
+                        session_id: build_session_id("usb-device-001"),
+                        selected_video_codec: VideoCodec::H264,
+                        channel_layout: ChannelLayout {
+                            session: hscrcpy_contracts::ChannelBinding {
+                                name: "session".to_string(),
+                                state: "ready".to_string(),
+                                payload_type: "utf8_json".to_string(),
+                                activation: "open first".to_string(),
+                            },
+                            video: hscrcpy_contracts::ChannelBinding {
+                                name: "video".to_string(),
+                                state: "pending_open".to_string(),
+                                payload_type: "binary".to_string(),
+                                activation: "open after ready".to_string(),
+                            },
+                        },
+                        display: DisplayInfo {
+                            width: 1280,
+                            height: 720,
+                            rotation: 0,
+                        },
+                    })),
+                ])))),
+                video_packets: Rc::new(RefCell::new(Some(VecDeque::from(vec![Ok(
+                    VideoTransportPacket::new(VideoCodec::H264, 777, true, vec![9, 8, 7]),
+                )])))),
+                sent_messages: Rc::new(RefCell::new(Vec::new())),
+                opened_video_codecs: Rc::new(RefCell::new(Vec::new())),
+            },
+        );
+
+        let mut plan = orchestrator
+            .start(&SessionBootstrap::new(
+                "usb-device-001",
+                SessionStartRequest::h264_mainline(60, false),
+            ))
+            .expect("startup should succeed before ingest validation");
+        assert_eq!(plan.response.selected_codec, VideoCodec::H264);
+
+        let err = plan
+            .runtime
+            .receive_video_ingress()
+            .expect_err("malformed non-Annex-B h264 packet should fail ingest");
+        assert!(matches!(err, HostError::ContractViolation(_)));
+        assert!(
+            err.to_string().contains("Annex-B"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn runtime_remains_compatible_with_control_emitter() {
         struct Sink {
             sent: Vec<SessionMessage>,

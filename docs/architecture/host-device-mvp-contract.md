@@ -177,7 +177,8 @@ Rules:
 
 * Host must reject packets whose `codec` tag does not match the negotiated codec.
 * `payload_length` must be positive and must match the number of bytes following the header.
-* The current bringup path uses valid placeholder JPEG bytes and structural placeholder H.264 Annex-B access units so transport/render can be validated before real capture/encode is integrated.
+* For `codec=h264`, payload bytes must be one Annex-B access unit (3-byte or 4-byte start-code delimiters) with at least one valid NAL unit.
+* For `codec=h264` packets marked `is_keyframe=1`, the access unit must include an IDR NAL (`nal_unit_type=5`) so host-side keyframe assumptions stay aligned with decoder expectations.
 
 ## 5. Contracts
 

@@ -8,6 +8,7 @@
 #include <map>
 #include <sstream>
 
+#include "capture/screen_capture_authorization_probe.h"
 #include "transport/video_channel.h"
 #include "video/h264_video_path.h"
 #include "video/jpeg_video_path.h"
@@ -732,7 +733,7 @@ std::string SelectSuggestedCodec(const core::HostHelloRequest &request, const st
 core::AuthorizationStateMap BuildAuthorizationStateMap()
 {
     return {
-        core::kAuthorizationGranted,
+        capture::auth::ProbeVideoCaptureAuthorizationState(),
         core::kAuthorizationGranted
     };
 }

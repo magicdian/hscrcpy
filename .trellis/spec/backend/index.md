@@ -38,6 +38,7 @@ Read these before changing backend code:
 6. [Database Guidelines](./database-guidelines.md) if any persistence is being introduced
 7. [Code Reuse Thinking Guide](../guides/code-reuse-thinking-guide.md) when adding helpers or shared constants
 8. [Cross-Layer Thinking Guide](../guides/cross-layer-thinking-guide.md) when touching ArkTS <-> N-API <-> native boundaries
+9. [Harmony hosScrcpy Debug Guide](../../docs/harmony-hos-scrcpy-debug-guide.md) when touching official `hosScrcpy`, `uitest_agent`, extension loading behavior, or device-side debug workflows
 
 ---
 
@@ -49,6 +50,7 @@ Read these before changing backend code:
 | [Database Guidelines](./database-guidelines.md) | Current no-database policy and escalation rules | Baseline defined |
 | [Error Handling](./error-handling.md) | Error propagation across ArkTS and native boundaries | Baseline defined |
 | [Host-Device MVP Contract](../../docs/architecture/host-device-mvp-contract.md) | Install/update, startup handshake, runtime ports, wire framing, and channel contracts | Runtime bringup defined |
+| [Harmony hosScrcpy Debug Guide](../../docs/harmony-hos-scrcpy-debug-guide.md) | Official `hosScrcpy` / `uitest_agent` artifact inventory and device-side debug commands | Official artifact guidance defined |
 | [Quality Guidelines](./quality-guidelines.md) | Review and testing expectations for early-stage code | Baseline defined |
 | [Logging Guidelines](./logging-guidelines.md) | Logging behavior and redaction rules | Baseline defined |
 

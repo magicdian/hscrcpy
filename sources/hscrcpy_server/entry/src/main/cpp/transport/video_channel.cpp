@@ -1,10 +1,12 @@
 #include "transport/video_channel.h"
 
+#include <algorithm>
 #include <arpa/inet.h>
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <sstream>
@@ -14,6 +16,8 @@
 #include <unistd.h>
 #include <vector>
 
+#include "capture/h264_screen_capture_source.h"
+#include "core/native_diag_log.h"
 #include "video/h264_video_path.h"
 #include "video/jpeg_video_path.h"
 
@@ -28,7 +32,38 @@ static constexpr uint8_t kVideoCodecTagH265 = 3;
 static constexpr size_t kVideoPacketHeaderLength = 14;
 static constexpr int kVideoStartupWaitSeconds = 2;
 static constexpr int kJpegFrameIntervalMs = 200;
-static constexpr int kH264FrameIntervalMs = 100;
+static constexpr int kH264AccessUnitPollMs = 200;
+static constexpr uint64_t kSendSummaryEveryPackets = 120;
+static constexpr int64_t kSlowSendWarnUs = 20000;
+static constexpr int64_t kBackpressureLagWarnUs = 80000;
+static constexpr uint64_t kSendWarnThrottlePackets = 120;
+
+struct SendWriteMetrics {
+    int64_t write_duration_us = 0;
+    uint64_t send_calls = 0;
+    uint64_t partial_writes = 0;
+};
+
+struct SendDiagnostics {
+    uint64_t packets = 0;
+    uint64_t keyframes = 0;
+    uint64_t payload_bytes = 0;
+    uint64_t packet_bytes = 0;
+    uint64_t slow_send_count = 0;
+    uint64_t partial_send_count = 0;
+    uint64_t backpressure_count = 0;
+    uint64_t total_send_calls = 0;
+    int64_t total_send_duration_us = 0;
+    int64_t max_send_duration_us = 0;
+    int64_t last_pts_us = -1;
+    int64_t last_send_done_wall_us = -1;
+    int64_t total_pts_step_us = 0;
+    int64_t total_send_gap_us = 0;
+    uint64_t pts_step_samples = 0;
+    uint64_t send_gap_samples = 0;
+    int64_t max_timeline_lag_us = 0;
+    uint64_t last_warning_packet = 0;
+};
 
 struct VideoRuntimeState {
     std::mutex mutex;
@@ -45,6 +80,189 @@ struct VideoRuntimeState {
 };
 
 VideoRuntimeState g_runtime;
+
+bool ShouldEmitSendSummary(uint64_t packets)
+{
+    return packets != 0 && (packets % kSendSummaryEveryPackets) == 0;
+}
+
+bool ShouldEmitSendWarning(uint64_t packets, uint64_t *last_warning_packet)
+{
+    if (last_warning_packet == nullptr) {
+        return false;
+    }
+    if (packets <= 3 || packets >= *last_warning_packet + kSendWarnThrottlePackets) {
+        *last_warning_packet = packets;
+        return true;
+    }
+    return false;
+}
+
+void LogSendSummary(
+    const core::VideoTransportState &state, const SendDiagnostics &diag, const char *reason, size_t latest_payload_bytes)
+{
+    const uint64_t avg_payload_bytes = diag.packets == 0 ? 0 : (diag.payload_bytes / diag.packets);
+    const uint64_t avg_send_duration_us =
+        diag.packets == 0 ? 0 : static_cast<uint64_t>(diag.total_send_duration_us / static_cast<int64_t>(diag.packets));
+    const uint64_t avg_send_calls = diag.packets == 0 ? 0 : (diag.total_send_calls / diag.packets);
+    const uint64_t avg_pts_step_us = diag.pts_step_samples == 0 ?
+        0 :
+        static_cast<uint64_t>(diag.total_pts_step_us / static_cast<int64_t>(diag.pts_step_samples));
+    const uint64_t avg_send_gap_us = diag.send_gap_samples == 0 ?
+        0 :
+        static_cast<uint64_t>(diag.total_send_gap_us / static_cast<int64_t>(diag.send_gap_samples));
+    const int64_t avg_timeline_lag_us = (diag.pts_step_samples == 0 || diag.send_gap_samples == 0) ?
+        0 :
+        static_cast<int64_t>(avg_send_gap_us) - static_cast<int64_t>(avg_pts_step_us);
+    core::diag::Info(
+        "transport/video_channel",
+        "send_summary",
+        "session_id=%s codec=%s reason=%s packets=%llu keyframes=%llu payload_bytes_total=%llu "
+        "payload_bytes_avg=%llu payload_bytes_latest=%zu packet_bytes_total=%llu send_duration_avg_us=%llu "
+        "send_duration_max_us=%lld send_calls_avg=%llu slow_sends=%llu partial_sends=%llu backpressure=%llu "
+        "pts_step_avg_us=%llu send_gap_avg_us=%llu timeline_lag_avg_us=%lld timeline_lag_max_us=%lld",
+        state.session_id.c_str(),
+        state.selected_video_codec.c_str(),
+        reason,
+        static_cast<unsigned long long>(diag.packets),
+        static_cast<unsigned long long>(diag.keyframes),
+        static_cast<unsigned long long>(diag.payload_bytes),
+        static_cast<unsigned long long>(avg_payload_bytes),
+        latest_payload_bytes,
+        static_cast<unsigned long long>(diag.packet_bytes),
+        static_cast<unsigned long long>(avg_send_duration_us),
+        static_cast<long long>(diag.max_send_duration_us),
+        static_cast<unsigned long long>(avg_send_calls),
+        static_cast<unsigned long long>(diag.slow_send_count),
+        static_cast<unsigned long long>(diag.partial_send_count),
+        static_cast<unsigned long long>(diag.backpressure_count),
+        static_cast<unsigned long long>(avg_pts_step_us),
+        static_cast<unsigned long long>(avg_send_gap_us),
+        static_cast<long long>(avg_timeline_lag_us),
+        static_cast<long long>(diag.max_timeline_lag_us));
+}
+
+void LogSendAnomaly(
+    const core::VideoTransportState &state,
+    const SendDiagnostics &diag,
+    const char *kind,
+    int64_t pts_us,
+    bool is_keyframe,
+    size_t payload_bytes,
+    size_t packet_bytes,
+    const SendWriteMetrics &metrics,
+    int64_t pts_step_us,
+    int64_t send_gap_us,
+    int64_t timeline_lag_us)
+{
+    core::diag::Warn(
+        "transport/video_channel",
+        "send_anomaly",
+        "session_id=%s codec=%s kind=%s packet_idx=%llu pts_us=%lld pts_step_us=%lld send_gap_us=%lld "
+        "timeline_lag_us=%lld keyframe=%d payload_bytes=%zu packet_bytes=%zu send_duration_us=%lld "
+        "send_calls=%llu partial_writes=%llu slow_sends=%llu partial_sends=%llu backpressure=%llu",
+        state.session_id.c_str(),
+        state.selected_video_codec.c_str(),
+        kind,
+        static_cast<unsigned long long>(diag.packets),
+        static_cast<long long>(pts_us),
+        static_cast<long long>(pts_step_us),
+        static_cast<long long>(send_gap_us),
+        static_cast<long long>(timeline_lag_us),
+        is_keyframe ? 1 : 0,
+        payload_bytes,
+        packet_bytes,
+        static_cast<long long>(metrics.write_duration_us),
+        static_cast<unsigned long long>(metrics.send_calls),
+        static_cast<unsigned long long>(metrics.partial_writes),
+        static_cast<unsigned long long>(diag.slow_send_count),
+        static_cast<unsigned long long>(diag.partial_send_count),
+        static_cast<unsigned long long>(diag.backpressure_count));
+}
+
+void RecordSendDiagnostics(
+    const core::VideoTransportState &state,
+    int64_t pts_us,
+    bool is_keyframe,
+    size_t payload_bytes,
+    size_t packet_bytes,
+    const SendWriteMetrics &metrics,
+    SendDiagnostics *diag)
+{
+    if (diag == nullptr) {
+        return;
+    }
+
+    ++diag->packets;
+    if (is_keyframe) {
+        ++diag->keyframes;
+    }
+    diag->payload_bytes += static_cast<uint64_t>(payload_bytes);
+    diag->packet_bytes += static_cast<uint64_t>(packet_bytes);
+    diag->total_send_calls += metrics.send_calls;
+    diag->total_send_duration_us += metrics.write_duration_us;
+    diag->max_send_duration_us = std::max(diag->max_send_duration_us, metrics.write_duration_us);
+
+    if (metrics.write_duration_us >= kSlowSendWarnUs) {
+        ++diag->slow_send_count;
+    }
+    if (metrics.send_calls > 1 || metrics.partial_writes > 0) {
+        ++diag->partial_send_count;
+    }
+
+    int64_t pts_step_us = -1;
+    if (diag->last_pts_us >= 0) {
+        pts_step_us = pts_us - diag->last_pts_us;
+        if (pts_step_us >= 0) {
+            diag->total_pts_step_us += pts_step_us;
+            ++diag->pts_step_samples;
+        }
+    }
+    diag->last_pts_us = pts_us;
+
+    const int64_t send_done_wall_us = core::diag::NowSteadyTimeUs();
+    int64_t send_gap_us = -1;
+    if (diag->last_send_done_wall_us >= 0) {
+        send_gap_us = send_done_wall_us - diag->last_send_done_wall_us;
+        if (send_gap_us >= 0) {
+            diag->total_send_gap_us += send_gap_us;
+            ++diag->send_gap_samples;
+        }
+    }
+    diag->last_send_done_wall_us = send_done_wall_us;
+
+    int64_t timeline_lag_us = 0;
+    bool backpressure_anomaly = false;
+    if (pts_step_us >= 0 && send_gap_us >= 0) {
+        timeline_lag_us = send_gap_us - pts_step_us;
+        if (timeline_lag_us > diag->max_timeline_lag_us) {
+            diag->max_timeline_lag_us = timeline_lag_us;
+        }
+        if (timeline_lag_us >= kBackpressureLagWarnUs) {
+            ++diag->backpressure_count;
+            backpressure_anomaly = true;
+        }
+    }
+
+    if (ShouldEmitSendSummary(diag->packets)) {
+        LogSendSummary(state, *diag, "interval", payload_bytes);
+    }
+
+    const bool slow_anomaly = metrics.write_duration_us >= kSlowSendWarnUs;
+    const bool partial_anomaly = (metrics.send_calls > 1 || metrics.partial_writes > 0);
+    if ((slow_anomaly || partial_anomaly || backpressure_anomaly) &&
+        ShouldEmitSendWarning(diag->packets, &diag->last_warning_packet)) {
+        const char *kind = "send_anomaly";
+        if (slow_anomaly) {
+            kind = "slow_send";
+        } else if (backpressure_anomaly) {
+            kind = "backpressure_lag";
+        } else if (partial_anomaly) {
+            kind = "partial_write";
+        }
+        LogSendAnomaly(state, *diag, kind, pts_us, is_keyframe, payload_bytes, packet_bytes, metrics, pts_step_us, send_gap_us, timeline_lag_us);
+    }
+}
 
 void CloseSocket(int *fd)
 {
@@ -71,6 +289,11 @@ bool IsRuntimeRunning()
 
 void SetRuntimeError(const std::string &message)
 {
+    core::diag::Error(
+        "transport/video_channel",
+        "runtime_error",
+        "message=%s",
+        message.c_str());
     std::lock_guard<std::mutex> lock(g_runtime.mutex);
     g_runtime.running = false;
     g_runtime.listener_bound = false;
@@ -99,16 +322,20 @@ std::string JoinNotes(const std::vector<std::string> &notes)
     return stream.str();
 }
 
-bool WriteAll(int fd, const uint8_t *bytes, size_t length, std::string *error)
+bool WriteAll(int fd, const uint8_t *bytes, size_t length, SendWriteMetrics *metrics, std::string *error)
 {
+    if (metrics != nullptr) {
+        *metrics = {};
+    }
+    const int64_t write_started_us = core::diag::NowSteadyTimeUs();
     size_t offset = 0;
     while (offset < length) {
+        const size_t remaining = length - offset;
         int flags = 0;
 #ifdef MSG_NOSIGNAL
         flags |= MSG_NOSIGNAL;
 #endif
-        const ssize_t written =
-            send(fd, bytes + offset, length - offset, flags);
+        const ssize_t written = send(fd, bytes + offset, remaining, flags);
         if (written < 0) {
             if (errno == EINTR) {
                 continue;
@@ -118,7 +345,22 @@ bool WriteAll(int fd, const uint8_t *bytes, size_t length, std::string *error)
             }
             return false;
         }
+        if (written == 0) {
+            if (error != nullptr) {
+                *error = "failed to write video packet bytes: send returned 0 before packet completion";
+            }
+            return false;
+        }
+        if (metrics != nullptr) {
+            ++metrics->send_calls;
+            if (static_cast<size_t>(written) < remaining) {
+                ++metrics->partial_writes;
+            }
+        }
         offset += static_cast<size_t>(written);
+    }
+    if (metrics != nullptr) {
+        metrics->write_duration_us = core::diag::NowSteadyTimeUs() - write_started_us;
     }
     return true;
 }
@@ -139,28 +381,25 @@ uint8_t EncodeVideoCodecTag(const std::string &codec, bool *ok)
     return 0;
 }
 
-std::vector<uint8_t> BuildPlaceholderPayload(const std::string &codec)
+std::vector<uint8_t> BuildPlaceholderPayloadForJpeg()
 {
-    if (codec == core::kVideoCodecH264) {
-        return video::h264::GetPlaceholderH264AccessUnitBytes();
-    }
     return video::jpeg::GetPlaceholderJpegFrameBytes();
 }
 
-std::chrono::milliseconds ResolveFrameInterval(const std::string &codec)
+std::chrono::milliseconds ResolveJpegFrameInterval()
 {
-    if (codec == core::kVideoCodecH264) {
-        return std::chrono::milliseconds(kH264FrameIntervalMs);
-    }
     return std::chrono::milliseconds(kJpegFrameIntervalMs);
 }
 
-bool IsKeyframe(const std::string &codec, uint64_t frame_index)
+void SetLastRuntimeError(const std::string &error)
 {
-    if (codec == core::kVideoCodecJpeg) {
-        return true;
-    }
-    return frame_index == 0 || frame_index % 30 == 0;
+    core::diag::Warn(
+        "transport/video_channel",
+        "stream_error",
+        "message=%s",
+        error.c_str());
+    std::lock_guard<std::mutex> lock(g_runtime.mutex);
+    g_runtime.last_error = error;
 }
 
 bool SerializeVideoPacket(
@@ -228,6 +467,106 @@ bool PrepareVideoPacketBytes(
     return SerializeVideoPacket(result.packet, payload, bytes, error);
 }
 
+bool SendPreparedVideoPacket(
+    int client_fd,
+    const core::VideoTransportState &state,
+    int64_t pts_us,
+    bool is_keyframe,
+    const std::vector<uint8_t> &payload,
+    SendDiagnostics *diag,
+    std::string *error)
+{
+    std::vector<uint8_t> packet_bytes;
+    std::string packet_error;
+    if (!PrepareVideoPacketBytes(state, pts_us, is_keyframe, payload, &packet_bytes, &packet_error)) {
+        if (error != nullptr) {
+            *error = "transport/video_channel.prepare_packet: " + packet_error;
+        }
+        return false;
+    }
+
+    std::string write_error;
+    SendWriteMetrics write_metrics = {};
+    if (!WriteAll(client_fd, packet_bytes.data(), packet_bytes.size(), &write_metrics, &write_error)) {
+        if (error != nullptr) {
+            *error = "transport/video_channel.write_packet: " + write_error;
+        }
+        return false;
+    }
+    RecordSendDiagnostics(state, pts_us, is_keyframe, payload.size(), packet_bytes.size(), write_metrics, diag);
+    return true;
+}
+
+void StreamJpegPlaceholderPackets(int client_fd, const core::VideoTransportState &state, SendDiagnostics *diag)
+{
+    const std::vector<uint8_t> payload = BuildPlaceholderPayloadForJpeg();
+    if (payload.empty()) {
+        SetLastRuntimeError("transport/video_channel.jpeg_placeholder: payload must not be empty");
+        return;
+    }
+
+    const std::chrono::milliseconds frame_interval = ResolveJpegFrameInterval();
+    const auto started_at = std::chrono::steady_clock::now();
+    auto next_deadline = started_at;
+
+    while (IsRuntimeRunning()) {
+        const auto now = std::chrono::steady_clock::now();
+        if (next_deadline > now) {
+            std::this_thread::sleep_until(next_deadline);
+        }
+
+        const auto current_time = std::chrono::steady_clock::now();
+        const int64_t pts_us = std::chrono::duration_cast<std::chrono::microseconds>(current_time - started_at).count();
+        std::string packet_error;
+        if (!SendPreparedVideoPacket(client_fd, state, pts_us, true, payload, diag, &packet_error)) {
+            SetLastRuntimeError(packet_error);
+            break;
+        }
+        next_deadline = current_time + frame_interval;
+    }
+}
+
+void StreamH264AccessUnits(int client_fd, const core::VideoTransportState &state, SendDiagnostics *diag)
+{
+    capture::h264::ScreenCaptureSource source;
+    std::string source_error;
+    if (!source.Start(state, &source_error)) {
+        SetLastRuntimeError("transport/video_channel.h264_start: " + source_error);
+        return;
+    }
+
+    while (IsRuntimeRunning()) {
+        capture::h264::AccessUnit unit = {};
+        std::string pull_error;
+        const capture::h264::PullResult pull_result =
+            source.PullAccessUnit(kH264AccessUnitPollMs, &unit, &pull_error);
+        if (pull_result == capture::h264::PullResult::kTimeout) {
+            continue;
+        }
+        if (pull_result == capture::h264::PullResult::kStopped) {
+            if (IsRuntimeRunning()) {
+                SetLastRuntimeError("transport/video_channel.h264_pull: capture runtime stopped unexpectedly");
+            }
+            break;
+        }
+        if (pull_result == capture::h264::PullResult::kError) {
+            SetLastRuntimeError("transport/video_channel.h264_pull: " + pull_error);
+            break;
+        }
+        if (unit.bytes.empty()) {
+            continue;
+        }
+
+        std::string packet_error;
+        if (!SendPreparedVideoPacket(client_fd, state, unit.pts_us, unit.is_keyframe, unit.bytes, diag, &packet_error)) {
+            SetLastRuntimeError(packet_error);
+            break;
+        }
+    }
+
+    source.Stop();
+}
+
 void StreamVideoPackets(int client_fd)
 {
     core::VideoTransportState configured_state = {};
@@ -250,49 +589,18 @@ void StreamVideoPackets(int client_fd)
         g_runtime.last_error.clear();
     }
 
-    const std::vector<uint8_t> payload = BuildPlaceholderPayload(activation.state.selected_video_codec);
-    if (payload.empty()) {
-        std::lock_guard<std::mutex> lock(g_runtime.mutex);
-        g_runtime.last_error = "placeholder video payload must not be empty";
-        return;
+    SendDiagnostics send_diag = {};
+    if (activation.state.selected_video_codec == core::kVideoCodecH264) {
+        StreamH264AccessUnits(client_fd, activation.state, &send_diag);
+    } else if (activation.state.selected_video_codec == core::kVideoCodecJpeg) {
+        StreamJpegPlaceholderPackets(client_fd, activation.state, &send_diag);
+    } else {
+        SetLastRuntimeError(
+            "transport/video_channel.stream: unsupported negotiated codec `" + activation.state.selected_video_codec + "`");
     }
 
-    const std::chrono::milliseconds frame_interval = ResolveFrameInterval(activation.state.selected_video_codec);
-    const auto started_at = std::chrono::steady_clock::now();
-    auto next_deadline = started_at;
-    uint64_t frame_index = 0;
-
-    while (IsRuntimeRunning()) {
-        const auto now = std::chrono::steady_clock::now();
-        if (next_deadline > now) {
-            std::this_thread::sleep_until(next_deadline);
-        }
-
-        const auto current_time = std::chrono::steady_clock::now();
-        const int64_t pts_us = std::chrono::duration_cast<std::chrono::microseconds>(current_time - started_at).count();
-        std::vector<uint8_t> packet_bytes;
-        std::string packet_error;
-        if (!PrepareVideoPacketBytes(
-                activation.state,
-                pts_us,
-                IsKeyframe(activation.state.selected_video_codec, frame_index),
-                payload,
-                &packet_bytes,
-                &packet_error)) {
-            std::lock_guard<std::mutex> lock(g_runtime.mutex);
-            g_runtime.last_error = packet_error;
-            break;
-        }
-
-        std::string write_error;
-        if (!WriteAll(client_fd, packet_bytes.data(), packet_bytes.size(), &write_error)) {
-            std::lock_guard<std::mutex> lock(g_runtime.mutex);
-            g_runtime.last_error = write_error;
-            break;
-        }
-
-        ++frame_index;
-        next_deadline = current_time + frame_interval;
+    if (send_diag.packets > 0) {
+        LogSendSummary(activation.state, send_diag, "stream_end", 0);
     }
 }
 

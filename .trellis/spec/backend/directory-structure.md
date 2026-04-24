@@ -66,6 +66,73 @@ Direction for new code:
   * `bridge/`
 * Keep the N-API boundary thin. The bridge should call core services, not contain business logic.
 
+### Current Native Runtime Layout
+
+The current device runtime now uses concrete native module slices under `entry/src/main/cpp/`:
+
+* `capture/`
+  * `screen_capture_authorization_probe.*` probes `OH_AVScreenCapture` authorization state for startup and POC flows.
+  * `h264_screen_capture_source.*` owns the `AVScreenCapture + VideoEncoder(surface)` runtime and access-unit queueing.
+* `codec/`
+  * `h264_encoder_capability.*` owns `video/avc` encoder capability resolution and width/height/fps/bitrate clamping.
+* `transport/`
+  * `video_channel.cpp` owns runtime activation, packet framing, send diagnostics, and codec-specific streaming loops.
+* `core/`
+  * `native_diag_log.h` is the shared native structured logging seam for high-volume runtime diagnostics.
+* `poc/`
+  * `uitest_extension_poc.cpp` is an experiment-only entry point for `UiTestExtension_OnInit/OnRun`.
+  * Treat this directory as disposable bringup code until the extension loading path is proven viable on real devices.
+
+### Scenario: Introducing New Native Runtime Modules
+
+#### Scope / Trigger
+
+Use this layout rule when adding a device-side native module that is consumed by the streaming runtime, host/device contract, or `uitest` extension experiments.
+
+#### Signatures
+
+* Device shared runtime build: `sources/hscrcpy_server/entry/src/main/cpp/CMakeLists.txt`
+* Production native output: `add_library(entry SHARED ...)`
+* Experiment extension output: `add_library(hscrcpy_uitest_poc SHARED ...)`
+
+#### Contracts
+
+* Files under `capture/`, `codec/`, `transport/`, and `core/` may be linked into `entry`.
+* Files under `poc/` may be linked into `hscrcpy_uitest_poc`, but must not become a hidden dependency of `entry`.
+* Shared helpers used by multiple runtime modules belong in `core/` only if they are runtime-safe and product-agnostic.
+
+#### Validation & Error Matrix
+
+| Change | Required validation | Failure signal |
+|--------|---------------------|----------------|
+| Add source to `entry` | DevEco native build or HAP build succeeds | native link/compile failure |
+| Add source to `hscrcpy_uitest_poc` | exported `UiTestExtension_OnInit/OnRun` still present | `nm -D` missing symbol or `uitest` load failure |
+| Move logic from bridge to native module | N-API call sites stay thin | bridge starts owning transport/capture logic |
+
+#### Good/Base/Bad Cases
+
+* Good: `capture/h264_screen_capture_source.cpp` owns screen capture state and is called by `transport/video_channel.cpp`.
+* Base: `codec/h264_encoder_capability.cpp` exposes pure configuration helpers without transport state.
+* Bad: adding screen-capture start/stop logic directly into `bridge/companion_napi.cpp` or ArkTS page files.
+
+#### Tests Required
+
+* Rust-side or host-side tests for any contract change exposed over transport.
+* DevEco native build for any new C++ file added to `entry` or `hscrcpy_uitest_poc`.
+* Real-device `hilog` verification when module changes touch capture, transport, or extension loading.
+
+#### Wrong vs Correct
+
+##### Wrong
+
+* `bridge/*.cpp` starts owning codec capability selection or screen-capture state machines.
+* `poc/` helpers are silently reused by production runtime because they already exist.
+
+##### Correct
+
+* Runtime modules live under `capture/`, `codec/`, `transport/`, and `core/`, with `bridge/` only forwarding explicit calls.
+* `poc/` remains explicitly isolated, documented, and safe to delete if the extension path is abandoned.
+
 ---
 
 ## Naming Conventions
