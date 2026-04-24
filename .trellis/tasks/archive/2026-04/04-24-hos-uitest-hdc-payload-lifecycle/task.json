@@ -1,8 +1,8 @@
 {
-  "id": "hos-route-abstraction-cli",
-  "name": "hos-route-abstraction-cli",
-  "title": "Route abstraction and CLI selection",
-  "description": "Introduce route-neutral host startup abstractions and explicit CLI route selection for uitest vs hscrcpy_server.",
+  "id": "hos-uitest-hdc-payload-lifecycle",
+  "name": "hos-uitest-hdc-payload-lifecycle",
+  "title": "HDC abstract socket and payload lifecycle",
+  "description": "Support localabstract forwarding, official payload selection from third_party, stale process handling, and temporary SO cleanup.",
   "status": "completed",
   "dev_type": "backend",
   "scope": null,

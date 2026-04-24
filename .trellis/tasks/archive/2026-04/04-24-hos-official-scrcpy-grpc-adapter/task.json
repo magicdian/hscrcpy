@@ -1,8 +1,8 @@
 {
-  "id": "hos-uitest-h264-render-ingress",
-  "name": "hos-uitest-h264-render-ingress",
-  "title": "UITest H264 ingress to renderer",
-  "description": "Convert official gRPC stream messages into normalized H.264 video ingress and feed the existing preview/render path.",
+  "id": "hos-official-scrcpy-grpc-adapter",
+  "name": "hos-official-scrcpy-grpc-adapter",
+  "title": "Official scrcpy gRPC adapter",
+  "description": "Add isolated Rust gRPC/protobuf adapter for official ScrcpyService onStart/onEnd/onRequestIDRFrame.",
   "status": "completed",
   "dev_type": "backend",
   "scope": null,

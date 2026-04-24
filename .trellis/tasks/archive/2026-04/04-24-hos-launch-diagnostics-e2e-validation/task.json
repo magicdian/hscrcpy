@@ -1,8 +1,8 @@
 {
-  "id": "hos-uitest-hdc-payload-lifecycle",
-  "name": "hos-uitest-hdc-payload-lifecycle",
-  "title": "HDC abstract socket and payload lifecycle",
-  "description": "Support localabstract forwarding, official payload selection from third_party, stale process handling, and temporary SO cleanup.",
+  "id": "hos-launch-diagnostics-e2e-validation",
+  "name": "hos-launch-diagnostics-e2e-validation",
+  "title": "Launch diagnostics and end-to-end validation",
+  "description": "Add route-aware diagnostics, fail-fast behavior, and validation coverage for successful and failed uitest startup.",
   "status": "completed",
   "dev_type": "backend",
   "scope": null,

@@ -45,16 +45,7 @@
   "commit": null,
   "pr_url": null,
   "subtasks": [],
-  "children": [
-    "04-24-hos-route-abstraction-cli",
-    "04-24-hos-uitest-hdc-payload-lifecycle",
-    "04-24-hos-codec-capability-registry",
-    "04-24-hos-official-scrcpy-grpc-adapter",
-    "04-24-hos-uitest-h264-render-ingress",
-    "04-24-hos-launch-diagnostics-e2e-validation",
-    "04-24-hos-uitest-real-grpc-transport-e2e",
-    "04-24-hos-uitest-tonic-prost-grpc"
-  ],
+  "children": [],
   "parent": "04-22-hos-scrcpy-brainstorm",
   "relatedFiles": [],
   "notes": "",

@@ -45,9 +45,7 @@
   "commit": null,
   "pr_url": null,
   "subtasks": [],
-  "children": [
-    "04-23-hos-host-launch-readiness"
-  ],
+  "children": [],
   "parent": null,
   "relatedFiles": [],
   "notes": "",

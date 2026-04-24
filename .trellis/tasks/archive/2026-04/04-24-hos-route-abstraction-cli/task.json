@@ -1,8 +1,8 @@
 {
-  "id": "hos-codec-capability-registry",
-  "name": "hos-codec-capability-registry",
-  "title": "Route-neutral codec capability registry",
-  "description": "Model route/device encoder and host decoder capabilities with an extensible codec registry while keeping H.264 as the current implementation target.",
+  "id": "hos-route-abstraction-cli",
+  "name": "hos-route-abstraction-cli",
+  "title": "Route abstraction and CLI selection",
+  "description": "Introduce route-neutral host startup abstractions and explicit CLI route selection for uitest vs hscrcpy_server.",
   "status": "completed",
   "dev_type": "backend",
   "scope": null,
