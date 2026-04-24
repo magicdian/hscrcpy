@@ -276,3 +276,45 @@ Implemented and archived the host launch readiness work: route abstraction, code
 ### Next Steps
 
 - None - task complete
+
+
+## Session 6: Stabilize uitest H.264 preview pipeline
+
+**Date**: 2026-04-24
+**Task**: Stabilize uitest H.264 preview pipeline
+**Branch**: `dev`
+
+### Summary
+
+Hardened the official uitest H.264 preview route: made H.264 artifacts opt-in, passed selected FPS to ffplay, preserved SPS/PPS before first IDR, added startup/timing diagnostics and graceful cleanup, documented official hosScrcpy/recorder limitations, and kept the brainstorm task active for remaining scope.
+
+### Main Changes
+
+- Made H.264 diagnostic artifacts opt-in with `--record-h264` so latency runs no longer write every access unit to disk by default.
+- Passed the selected stream FPS into ffplay's raw H.264 input `-framerate` option and kept the host default at 120 FPS.
+- Preserved SPS/PPS decoder configuration before the first IDR so ffplay can start reliably after official `uitest` sends pre-keyframe units.
+- Added startup phase timing, first-frame timing, keyframe visibility, live-preview diagnostics, SIGINT graceful shutdown, and stale official `xdevice_scrcpy` / fport cleanup.
+- Propagated HAP video configuration into the device encoder path for frame rate, bitrate, and I-frame interval.
+- Compared official Huawei `hosScrcpy` and recorder behavior on device; documented that static-screen first-frame weakness and recorder failure are also official-side issues for this package/device combination.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0804bda` | (see git log) |
+
+### Testing
+
+- [OK] `cargo fmt -- --check`
+- [OK] `cargo check --workspace --offline`
+- [OK] `cargo test --workspace --offline -- --nocapture`
+- [OK] `git diff --check`
+- [OK] Real-device manual check: `--route uitest --codec h264 --ffplay-bin /opt/homebrew/bin/ffplay` displayed smoothly after SPS/PPS preview fix.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- Keep `04-22-hos-scrcpy-brainstorm` active for remaining MVP planning and future HAP/control-route work.
