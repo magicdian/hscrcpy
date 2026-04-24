@@ -1,3 +1,4 @@
+use crate::cancellation::CancellationToken;
 use crate::{HostError, HostResult};
 use hscrcpy_contracts::VideoCodec;
 use std::time::{Duration, Instant};
@@ -7,6 +8,7 @@ use tonic::transport::{Channel, Endpoint};
 pub const DEFAULT_MAX_RECEIVE_MESSAGE_BYTES: usize = 10 * 1024 * 1024;
 const GRPC_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 const GRPC_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+const GRPC_STREAM_START_POLL_TIMEOUT: Duration = Duration::from_millis(100);
 const GRPC_STREAM_POLL_TIMEOUT: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +89,21 @@ impl OfficialScrcpyClient<TonicGrpcTransport> {
             TonicGrpcTransport,
         )
     }
+
+    pub fn start_with_cancellation<C>(
+        &mut self,
+        cancellation: &C,
+    ) -> HostResult<OfficialScrcpyStream>
+    where
+        C: CancellationToken + ?Sized,
+    {
+        let stream = self
+            .transport
+            .on_start_with_cancellation(&self.config, cancellation)?;
+        Ok(OfficialScrcpyStream::new(Box::new(
+            stream.map(|message| message.and_then(convert_reply_message)),
+        )))
+    }
 }
 
 impl<T> OfficialScrcpyClient<T>
@@ -165,6 +182,23 @@ impl OfficialScrcpyTransport for TonicGrpcTransport {
     }
 }
 
+impl TonicGrpcTransport {
+    fn on_start_with_cancellation<C>(
+        &mut self,
+        config: &OfficialScrcpyClientConfig,
+        cancellation: &C,
+    ) -> HostResult<TonicGrpcStartStream>
+    where
+        C: CancellationToken + ?Sized,
+    {
+        TonicGrpcConnection::open_streaming_with_cancellation(
+            config,
+            protocol::ON_START_PATH,
+            cancellation,
+        )
+    }
+}
+
 struct TonicGrpcConnection {
     runtime: Runtime,
     client: protocol::scrcpy_service_client::ScrcpyServiceClient<Channel>,
@@ -215,13 +249,52 @@ impl TonicGrpcConnection {
         config: &OfficialScrcpyClientConfig,
         method: &str,
     ) -> HostResult<TonicGrpcStartStream> {
+        Self::open_streaming_with_cancellation(config, method, &crate::cancellation::NoCancellation)
+    }
+
+    fn open_streaming_with_cancellation<C>(
+        config: &OfficialScrcpyClientConfig,
+        method: &str,
+        cancellation: &C,
+    ) -> HostResult<TonicGrpcStartStream>
+    where
+        C: CancellationToken + ?Sized,
+    {
+        if cancellation.is_cancelled() {
+            return Err(HostError::ShutdownRequested(format!(
+                "host shutdown requested before {method}"
+            )));
+        }
         let TonicGrpcConnection {
             runtime,
             mut client,
         } = Self::connect(config, method)?;
-        let response = runtime
-            .block_on(client.on_start(tonic::Request::new(protocol::Empty {})))
-            .map_err(|error| grpc_status_error(config, method, "grpc-start", error))?;
+        if cancellation.is_cancelled() {
+            return Err(HostError::ShutdownRequested(format!(
+                "host shutdown requested before grpc-start target `{}` method `{method}`",
+                config.target()
+            )));
+        }
+        let response = runtime.block_on(async {
+            let start = client.on_start(tonic::Request::new(protocol::Empty {}));
+            tokio::pin!(start);
+            loop {
+                tokio::select! {
+                    response = &mut start => {
+                        return response
+                            .map_err(|error| grpc_status_error(config, method, "grpc-start", error));
+                    }
+                    _ = tokio::time::sleep(GRPC_STREAM_START_POLL_TIMEOUT) => {
+                        if cancellation.is_cancelled() {
+                            return Err(HostError::ShutdownRequested(format!(
+                                "host shutdown requested during grpc-start target `{}` method `{method}`",
+                                config.target()
+                            )));
+                        }
+                    }
+                }
+            }
+        })?;
 
         Ok(TonicGrpcStartStream {
             inner: response.into_inner(),
@@ -392,6 +465,7 @@ mod tests {
         convert_reply_message, OfficialScrcpyClient, OfficialScrcpyClientConfig,
         OfficialScrcpyControlResult, OfficialScrcpyTransport, DEFAULT_MAX_RECEIVE_MESSAGE_BYTES,
     };
+    use crate::cancellation::CancellationToken;
     use crate::official_scrcpy::protocol::{
         param_value, ParamValue, ReplyEndMessage, ReplyMessage,
     };
@@ -405,6 +479,14 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct Cancelled;
+
+    impl CancellationToken for Cancelled {
+        fn is_cancelled(&self) -> bool {
+            true
+        }
+    }
 
     #[derive(Clone, Default)]
     struct RecordingTransport {
@@ -642,6 +724,23 @@ mod tests {
                 DEFAULT_MAX_RECEIVE_MESSAGE_BYTES,
                 DEFAULT_MAX_RECEIVE_MESSAGE_BYTES
             ]
+        );
+    }
+
+    #[test]
+    fn start_with_cancellation_returns_before_connect_when_cancelled() {
+        let mut client = OfficialScrcpyClient::for_forwarded_local_tcp(27182);
+
+        let err = match client.start_with_cancellation(&Cancelled) {
+            Ok(_) => panic!("cancelled start should not try to connect"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(err, HostError::ShutdownRequested(_)));
+        assert!(
+            err.to_string()
+                .contains("host shutdown requested before /ScrcpyService/onStart"),
+            "unexpected error: {err}"
         );
     }
 

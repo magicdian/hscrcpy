@@ -111,6 +111,41 @@ Implementation guidance:
 * Do not expose `epoll` or `select` as the host runtime contract. The public host/session boundary should state "wait for video, control, or cancellation" and leave platform-specific readiness mechanics behind adapters.
 * Unit tests for host runtime or route adapters should cover cancellation while no video packet is available and while startup is between route lifecycle steps.
 
+Executable signatures:
+
+* `crates/hscrcpy-host/src/cancellation.rs`
+  * `pub trait CancellationToken { fn is_cancelled(&self) -> bool; }`
+  * `pub struct NoCancellation`
+* `crates/hscrcpy-host/src/error.rs`
+  * `HostError::ShutdownRequested(String)` is the domain error for graceful host-initiated cancellation.
+* `crates/hscrcpy-host/src/session/startup.rs`
+  * `SessionOrchestrator::start(&SessionBootstrap)` keeps the existing non-cancellable API and delegates to `NoCancellation`.
+  * `SessionOrchestrator::start_with_cancellation(&SessionBootstrap, &impl CancellationToken)` must be used by CLI/UI/test callers that can stop startup.
+* `crates/hscrcpy-host/src/official_scrcpy.rs`
+  * `OfficialScrcpyClient<TonicGrpcTransport>::start_with_cancellation(&impl CancellationToken)` wraps `/ScrcpyService/onStart` with bounded cancellation checks.
+
+Validation and error behavior:
+
+| Cancellation point | Required behavior | Error / output |
+|--------------------|-------------------|----------------|
+| Before session startup or after companion prepare | Return before route mutation when possible | `HostError::ShutdownRequested` |
+| After `uitest` route launch | Run `cleanup_uitest_runtime`, then return | `HostError::ShutdownRequested` |
+| During `/ScrcpyService/onStart` gRPC start | Poll the future on a 100ms interval and observe `CancellationToken` between polls | `HostError::ShutdownRequested("... during grpc-start ...")` |
+| Between `uitest` gRPC start retries | Sleep in short cancellable slices, not one opaque delay | `HostError::ShutdownRequested` |
+| CLI receives `ShutdownRequested` during startup | Treat as graceful user stop, not startup failure | print `received SIGINT; startup cancelled gracefully: ...` |
+
+Good / base / bad:
+
+* Good: Ctrl+C during `startup phase=route_start_begin` exits promptly with `received SIGINT; startup cancelled gracefully: host shutdown requested during grpc-start target ... method /ScrcpyService/onStart`.
+* Base: Ctrl+C during capture still exits through the existing graceful stop path and calls selected-route cleanup.
+* Bad: Blocking indefinitely inside `client.on_start(...)` until the device sends the first H.264 payload or IDR.
+
+Required tests:
+
+* `official_scrcpy::tests::start_with_cancellation_returns_before_connect_when_cancelled` must assert cancellation is returned before any gRPC connection attempt.
+* `session::startup::tests::uitest_startup_observes_cancellation_after_route_launch` must assert cancellation after route launch returns `ShutdownRequested` and does not produce a runtime.
+* Manual real-device check: start `--route uitest --codec h264 --uitest-startup-snapshot-idr`, press Ctrl+C before the first stream payload, and confirm prompt graceful cancellation without waiting for IDR.
+
 ### Scenario: Official UITest gRPC Route Adapter
 
 #### 1. Scope / Trigger

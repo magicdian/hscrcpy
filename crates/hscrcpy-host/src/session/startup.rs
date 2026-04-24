@@ -1,6 +1,7 @@
 use super::runtime::{
     endpoint_port, SessionRuntime, SessionTransportFactory, TcpSessionTransportFactory,
 };
+use crate::cancellation::{CancellationToken, NoCancellation};
 use crate::companion::{
     CompanionLaunchRequest, CompanionManager, CompanionPlan, RouteCompanionManager,
 };
@@ -109,7 +110,20 @@ where
     }
 
     pub fn start(&self, bootstrap: &SessionBootstrap) -> HostResult<SessionStartupPlan> {
+        self.start_with_cancellation(bootstrap, &NoCancellation)
+    }
+
+    pub fn start_with_cancellation<Cancel>(
+        &self,
+        bootstrap: &SessionBootstrap,
+        cancellation: &Cancel,
+    ) -> HostResult<SessionStartupPlan>
+    where
+        Cancel: CancellationToken + ?Sized,
+    {
+        check_cancellation(cancellation, "before session startup")?;
         let companion_plan = self.prepare(bootstrap)?;
+        check_cancellation(cancellation, "after companion prepare")?;
 
         let host_codec_capability = host_codec_capability();
         let preferred_codec_order = normalize_requested_codec_order_for_host_hello(
@@ -143,6 +157,19 @@ where
             };
             return Err(error);
         }
+        if let Err(error) = check_cancellation(cancellation, "after route launch") {
+            if bootstrap.route == HostRoute::Uitest {
+                if let Ok(local_port) = endpoint_port(&session_channel) {
+                    let _ = cleanup_uitest_runtime(
+                        &self.hdc,
+                        &bootstrap.device_id,
+                        local_port,
+                        UITEST_GRPC_SOCKET_NAME,
+                    );
+                }
+            }
+            return Err(error);
+        }
 
         if bootstrap.route == HostRoute::Uitest {
             let startup_result = start_uitest_official_stream(
@@ -150,6 +177,7 @@ where
                 &bootstrap.request,
                 &session_channel,
                 &companion_plan.artifact_hint,
+                cancellation,
             );
             if let Err(error) = startup_result {
                 let error = if matches!(error, HostError::TransportFailure(_)) {
@@ -173,16 +201,19 @@ where
             return startup_result;
         }
 
+        check_cancellation(cancellation, "before session channel forward")?;
         forward_hdc_endpoint(
             &self.hdc,
             &bootstrap.device_id,
             bootstrap.route,
             &session_channel,
         )?;
+        check_cancellation(cancellation, "before session channel open")?;
         let mut session_runtime = self.transport.open_session_channel(&session_channel)?;
 
         let host_hello = build_host_hello(&session_id, &bootstrap.request, &preferred_codec_order);
         session_runtime.send_message(&SessionMessage::HostHello(host_hello.clone()))?;
+        check_cancellation(cancellation, "before device_hello receive")?;
         let first_inbound = session_runtime.receive_message()?;
 
         let device_hello = match first_inbound {
@@ -226,6 +257,7 @@ where
         );
         session_runtime.send_message(&SessionMessage::SessionConfig(session_config.clone()))?;
 
+        check_cancellation(cancellation, "before session_ready receive")?;
         let session_ready = match session_runtime.receive_message()? {
             InboundSessionMessage::SessionReady(message) => message,
             InboundSessionMessage::SessionError(error) => {
@@ -241,12 +273,14 @@ where
         };
         validate_session_ready(&session_ready, &session_id, &selected_codec)?;
 
+        check_cancellation(cancellation, "before video channel forward")?;
         forward_hdc_endpoint(
             &self.hdc,
             &bootstrap.device_id,
             bootstrap.route,
             &video_channel,
         )?;
+        check_cancellation(cancellation, "before video channel open")?;
         let video_runtime = self
             .transport
             .open_video_channel(&video_channel, selected_codec.clone())?;
@@ -385,7 +419,9 @@ fn start_uitest_official_stream(
     request: &SessionStartRequest,
     session_channel: &ChannelEndpoint,
     selected_payload: &str,
+    cancellation: &(impl CancellationToken + ?Sized),
 ) -> HostResult<SessionStartupPlan> {
+    check_cancellation(cancellation, "before official uitest stream start")?;
     let local_port = endpoint_port(session_channel)?;
     let session_id = build_session_id(device_id);
     let route_supported_codecs = vec![official_h264_descriptor()];
@@ -405,16 +441,22 @@ fn start_uitest_official_stream(
     let mut last_start_error = None;
     let mut stream = None;
     for attempt in 1..=UITEST_GRPC_START_ATTEMPTS {
+        check_cancellation(cancellation, "before official grpc-start attempt")?;
         let mut start_client = OfficialScrcpyClient::for_forwarded_local_tcp(local_port);
-        match start_client.start() {
+        match start_client.start_with_cancellation(cancellation) {
             Ok(start_stream) => {
                 stream = Some(start_stream);
                 break;
             }
+            Err(error @ HostError::ShutdownRequested(_)) => return Err(error),
             Err(error) => {
                 last_start_error = Some(error);
                 if attempt < UITEST_GRPC_START_ATTEMPTS {
-                    thread::sleep(Duration::from_millis(UITEST_GRPC_START_RETRY_MS));
+                    sleep_unless_cancelled(
+                        cancellation,
+                        Duration::from_millis(UITEST_GRPC_START_RETRY_MS),
+                        "between official grpc-start attempts",
+                    )?;
                 }
             }
         }
@@ -427,7 +469,9 @@ fn start_uitest_official_stream(
             "route `uitest` phase `grpc-start` target `{target}` method `/ScrcpyService/onStart` selected_payload `{selected_payload}` selected_codec=h264 attempts={UITEST_GRPC_START_ATTEMPTS}: {error}"
         ))
     })?;
+    check_cancellation(cancellation, "after official grpc-start")?;
     wake_official_scrcpy_display(device_id, selected_payload);
+    check_cancellation(cancellation, "after official scrcpy wakeup")?;
     if request.request_official_idr_on_start {
         request_official_scrcpy_idr(local_port, device_id, selected_payload);
     }
@@ -509,6 +553,34 @@ fn start_uitest_official_stream(
         outbound_session_messages: Vec::new(),
         runtime,
     })
+}
+
+fn check_cancellation(
+    cancellation: &(impl CancellationToken + ?Sized),
+    phase: &str,
+) -> HostResult<()> {
+    if cancellation.is_cancelled() {
+        return Err(HostError::ShutdownRequested(format!(
+            "host shutdown requested {phase}"
+        )));
+    }
+    Ok(())
+}
+
+fn sleep_unless_cancelled(
+    cancellation: &(impl CancellationToken + ?Sized),
+    duration: Duration,
+    phase: &str,
+) -> HostResult<()> {
+    let mut remaining = duration;
+    let step = Duration::from_millis(25);
+    while remaining > Duration::ZERO {
+        check_cancellation(cancellation, phase)?;
+        let sleep_for = remaining.min(step);
+        thread::sleep(sleep_for);
+        remaining = remaining.saturating_sub(sleep_for);
+    }
+    check_cancellation(cancellation, phase)
 }
 
 struct OfficialScrcpyControlChannel {
@@ -840,6 +912,7 @@ mod tests {
         build_session_id, normalize_requested_codec_order_for_host_hello, resolve_control_mode,
         SessionBootstrap, SessionOrchestrator,
     };
+    use crate::cancellation::CancellationToken;
     use crate::companion::{
         CompanionAction, CompanionLaunchRequest, CompanionManager, CompanionPlan,
     };
@@ -854,12 +927,35 @@ mod tests {
         DisplayInfo, FeatureAuthorization, InboundSessionMessage, SessionFeature, SessionMessage,
         SessionReady, SessionStartRequest, VideoCodec, VideoCodecDescriptor,
     };
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::rc::Rc;
 
     struct TestHdcBridge {
         forwarded_ports: Rc<RefCell<Vec<(String, u16, u16)>>>,
+    }
+
+    struct CancelAfterChecks {
+        remaining_clear_checks: Cell<usize>,
+    }
+
+    impl CancelAfterChecks {
+        fn new(remaining_clear_checks: usize) -> Self {
+            Self {
+                remaining_clear_checks: Cell::new(remaining_clear_checks),
+            }
+        }
+    }
+
+    impl CancellationToken for CancelAfterChecks {
+        fn is_cancelled(&self) -> bool {
+            let remaining = self.remaining_clear_checks.get();
+            if remaining == 0 {
+                return true;
+            }
+            self.remaining_clear_checks.set(remaining - 1);
+            false
+        }
     }
 
     impl HdcBridge for TestHdcBridge {
@@ -1159,6 +1255,39 @@ mod tests {
             }
             unexpected => panic!("unexpected ingress: {unexpected:?}"),
         }
+    }
+
+    #[test]
+    fn uitest_startup_observes_cancellation_after_route_launch() {
+        let companion = TestCompanionManager::with_artifact_hint("selected-uitest-payload.so");
+        let launched_sessions = companion.launched_sessions.clone();
+        let orchestrator = SessionOrchestrator::with_transport(
+            TestHdcBridge {
+                forwarded_ports: Rc::new(RefCell::new(Vec::new())),
+            },
+            companion,
+            TestTransportFactory {
+                session_messages: Rc::new(RefCell::new(Some(VecDeque::new()))),
+                video_packets: Rc::new(RefCell::new(Some(VecDeque::new()))),
+                sent_messages: Rc::new(RefCell::new(Vec::new())),
+                opened_video_codecs: Rc::new(RefCell::new(Vec::new())),
+            },
+        );
+
+        let err = match orchestrator.start_with_cancellation(
+            &SessionBootstrap::new(
+                "usb-device-001",
+                SessionStartRequest::h264_mainline(60, false),
+                HostRoute::Uitest,
+            ),
+            &CancelAfterChecks::new(2),
+        ) {
+            Ok(_) => panic!("cancelled startup should not produce a runtime"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(err, HostError::ShutdownRequested(_)));
+        assert_eq!(launched_sessions.borrow().len(), 1);
     }
 
     #[test]

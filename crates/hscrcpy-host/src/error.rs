@@ -8,6 +8,7 @@ pub enum HostError {
     PayloadSelection(String),
     TransportFailure(String),
     ReceiveTimeout(String),
+    ShutdownRequested(String),
     RenderFailure(String),
     ContractViolation(String),
 }
@@ -23,6 +24,7 @@ impl fmt::Display for HostError {
             Self::PayloadSelection(reason) => write!(f, "payload selection failed: {reason}"),
             Self::TransportFailure(reason) => write!(f, "transport failure: {reason}"),
             Self::ReceiveTimeout(reason) => write!(f, "receive timeout: {reason}"),
+            Self::ShutdownRequested(reason) => write!(f, "shutdown requested: {reason}"),
             Self::RenderFailure(reason) => write!(f, "render failure: {reason}"),
             Self::ContractViolation(reason) => write!(f, "contract violation: {reason}"),
         }

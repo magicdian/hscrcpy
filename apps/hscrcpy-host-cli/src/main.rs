@@ -1,4 +1,5 @@
 use hscrcpy_contracts::{SessionStartRequest, VideoCodec};
+use hscrcpy_host::cancellation::CancellationToken;
 use hscrcpy_host::hdc::RuntimeHdcBridge;
 use hscrcpy_host::render::{
     BringupDiagnosticsSummary, BringupRenderSurface, H264LivePreviewConfig,
@@ -141,8 +142,12 @@ fn run_bringup(options: CliOptions, interrupt: InterruptFlag) -> HostResult<()> 
         options.uitest_flavor.as_str(),
     );
     let _ = io::stdout().flush();
-    let mut plan = match orchestrator.start(&bootstrap) {
+    let mut plan = match orchestrator.start_with_cancellation(&bootstrap, &interrupt) {
         Ok(plan) => plan,
+        Err(HostError::ShutdownRequested(message)) => {
+            println!("received SIGINT; startup cancelled gracefully: {message}");
+            return Ok(());
+        }
         Err(error) => {
             println!(
                 "startup phase=route_start_failed elapsed_ms={}",
@@ -578,6 +583,12 @@ struct InterruptFlag;
 impl InterruptFlag {
     fn is_interrupted(self) -> bool {
         SIGINT_REQUESTED.load(Ordering::SeqCst)
+    }
+}
+
+impl CancellationToken for InterruptFlag {
+    fn is_cancelled(&self) -> bool {
+        self.is_interrupted()
     }
 }
 

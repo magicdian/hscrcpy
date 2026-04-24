@@ -1,3 +1,4 @@
+pub mod cancellation;
 pub mod client;
 pub mod companion;
 pub mod control;
