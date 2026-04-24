@@ -93,6 +93,24 @@ The Rust host workspace keeps route-specific protocols behind host adapter modul
 * `crates/hscrcpy-host/proto/scrcpy.proto` is the repo-local schema reconstructed from the generated descriptor embedded in `xdevice_devicetest-6.1.0.210-py3-none-any.whl/devicetest/controllers/tools/recorder/proto/scrcpy_pb2.py`; it is not a public Huawei `.proto` source file and was not recovered by reverse engineering the device-side `.so`.
 * `crates/hscrcpy-host/src/video/mod.rs` owns route-neutral video ingress adapters consumed by `render/bringup.rs`.
 
+### Host Streaming Cancellation Contract
+
+Host shutdown is a runtime contract, not a CLI detail. Ctrl+C/SIGINT, future UI stop buttons, and test harness cancellation must all travel through one portable cancellation abstraction that can be passed into startup, session runtime, route adapters, renderers, and cleanup.
+
+Required behavior for long-running host code:
+
+* Route startup must observe cancellation between lifecycle steps and after bounded waits. A SIGINT during `uitest` payload launch, gRPC connect/start, display wakeup, IDR request, or first stream setup must stop the selected route and run cleanup instead of waiting for route startup to finish normally.
+* Capture loops must not rely on "the next frame" to notice shutdown. If the device sends no IDR, only pre-IDR H.264 units, or no stream data at all, the host must still return to the shutdown path promptly.
+* Transport APIs should expose cancellation-aware receive operations rather than hiding unbounded blocking reads inside route-specific iterators. A timeout-based polling fallback is acceptable during bringup only if the timeout is short and documented.
+* Renderer writes to ffplay or future preview backends must be treated as cancellable or bounded operations. A slow child process stdin write must not permanently block session stop.
+* Route cleanup must be idempotent because cancellation can arrive during startup, capture, render, or shutdown.
+
+Implementation guidance:
+
+* Prefer portable Rust-level cancellation first: a shared token, crossbeam channel, or Tokio cancellation pattern. Keep Unix-only `select(2)`/`epoll(7)` and Windows-specific I/O details inside transport adapters if they become necessary.
+* Do not expose `epoll` or `select` as the host runtime contract. The public host/session boundary should state "wait for video, control, or cancellation" and leave platform-specific readiness mechanics behind adapters.
+* Unit tests for host runtime or route adapters should cover cancellation while no video packet is available and while startup is between route lifecycle steps.
+
 ### Scenario: Official UITest gRPC Route Adapter
 
 #### 1. Scope / Trigger

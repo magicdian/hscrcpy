@@ -39,6 +39,7 @@ For each arrow, ask:
 | Backend ↔ Frontend | Serialization, date formats |
 | Component ↔ Component | Props shape changes |
 | Manifest/config ↔ Runtime APIs | Duplicate keys, dropped permissions, build-time config that changes OS capability at runtime |
+| CLI signal ↔ Host startup/render/runtime | Ctrl+C only sets a process-level interrupt flag, but startup, stream reads, renderer writes, or cleanup keep blocking until their own I/O returns |
 
 ### Step 3: Define Contracts
 
@@ -75,6 +76,14 @@ For each boundary:
 
 **Good**: Merge new permissions into the existing array and add a static guard for required runtime permissions. Duplicate JSON/JSON5 object keys can make the later key override the earlier one, so a native socket failure can be caused by a manifest edit rather than transport code.
 
+### Mistake 5: Treating Ctrl+C as a CLI-Only Concern
+
+**Bad**: Installing a SIGINT handler in the CLI and checking it only between video frames or after route startup completes.
+
+**Good**: Model shutdown as a cross-layer cancellation contract. Every long-running host phase must either accept the shared cancellation token directly or use a bounded wait that returns control quickly enough to observe it. This includes route startup, HDC operations, gRPC stream polling, TCP packet reads, renderer writes, child-process management, and device cleanup.
+
+Do not make the contract depend on Unix-only primitives such as raw `select(2)` or `epoll(7)` at the application boundary. Prefer a portable Rust abstraction first: a cancellation token plus bounded blocking operations, a crossbeam channel, or a Tokio runtime for async I/O. Platform-specific polling can exist inside a transport adapter, but the session/runtime API must expose portable cancellation semantics that still work on Linux, macOS, and Windows.
+
 ---
 
 ## Checklist for Cross-Layer Features
@@ -85,11 +94,13 @@ Before implementation:
 - [ ] Defined format at each boundary
 - [ ] Decided where validation happens
 - [ ] Checked manifest/config changes for duplicate keys and preserved existing runtime permissions
+- [ ] Defined how cancellation moves through every long-running phase, including startup before the first frame exists
 
 After implementation:
 - [ ] Tested with edge cases (null, empty, invalid)
 - [ ] Verified error handling at each boundary
 - [ ] Checked data survives round-trip
+- [ ] Verified Ctrl+C or equivalent shutdown exits promptly when the device sends no video data, sends only pre-IDR H.264 units, or blocks during route startup
 
 ---
 
