@@ -428,6 +428,9 @@ fn start_uitest_official_stream(
         ))
     })?;
     wake_official_scrcpy_display(device_id, selected_payload);
+    if request.request_official_idr_on_start {
+        request_official_scrcpy_idr(local_port, device_id, selected_payload);
+    }
 
     let authorization = FeatureAuthorization {
         video_capture: AuthorizationState::Granted,
@@ -590,6 +593,28 @@ fn wake_official_scrcpy_display(device_id: &str, selected_payload: &str) {
             "official_scrcpy_wakeup_failed",
             format!(
                 "device={} payload={} error={}",
+                device_id, selected_payload, error
+            ),
+        ),
+    }
+}
+
+fn request_official_scrcpy_idr(local_port: u16, device_id: &str, selected_payload: &str) {
+    let mut client = OfficialScrcpyClient::for_forwarded_local_tcp(local_port);
+    match client.request_idr_frame() {
+        Ok(result) => host_log::info(
+            "uitest",
+            "official_scrcpy_request_idr",
+            format!(
+                "device={} payload={} method=/ScrcpyService/onRequestIDRFrame result={}",
+                device_id, selected_payload, result.result
+            ),
+        ),
+        Err(error) => host_log::warn(
+            "uitest",
+            "official_scrcpy_request_idr_failed",
+            format!(
+                "device={} payload={} method=/ScrcpyService/onRequestIDRFrame error={}",
                 device_id, selected_payload, error
             ),
         ),
@@ -1363,6 +1388,7 @@ mod tests {
                 requested_codec_order: vec![VideoCodec::H265Experimental],
                 preferred_max_fps: 60,
                 enable_control: false,
+                request_official_idr_on_start: false,
             },
             HostRoute::HscrcpyServer,
         )) {

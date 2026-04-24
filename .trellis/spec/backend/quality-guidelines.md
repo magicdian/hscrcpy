@@ -28,6 +28,8 @@ This repo is early-stage, so discipline matters more than completeness. New back
 * Prefer explicit capability negotiation over hard-coded assumptions
 * Update specs when a new architectural pattern is introduced
 * Keep experiment-only native paths explicitly isolated from production runtime targets
+* When adding HarmonyOS module permissions, merge them into the existing `requestPermissions` array. Do not add a second same-named key; JSON/JSON5 parsers may keep only the later value, silently dropping required permissions such as `ohos.permission.INTERNET`.
+* If a manifest fix changes packaged runtime behavior, bump the HAP `versionCode` and keep the host bundled companion manifest in sync so installed broken builds are upgraded instead of treated as ready.
 
 ---
 
@@ -53,6 +55,8 @@ Minimum expectation for new backend work:
 * Are failures surfaced with enough context?
 * Are names still template residue, or do they reflect real responsibilities?
 * Did the change introduce reusable constants or helpers that should be centralized?
+* Did manifest/config edits preserve existing keys and permissions instead of replacing them with duplicate object properties?
+* If the fix requires reinstalling a companion, will host install/update planning actually detect a newer bundled version?
 
 ---
 

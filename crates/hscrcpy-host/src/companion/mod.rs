@@ -72,8 +72,8 @@ impl BundledCompanionManifest {
         Self {
             companion_id: "cn.magicdian.hscrcpy.server".to_string(),
             artifact_path: "assets/companion/hscrcpy_server.hap".to_string(),
-            version_name: "1.0.0".to_string(),
-            version_code: 1_000_000,
+            version_name: "1.0.7".to_string(),
+            version_code: 1_000_007,
             protocol_major: PROTOCOL_MAJOR_MVP,
             protocol_minor: PROTOCOL_MINOR_MVP,
             sha256: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
@@ -570,6 +570,8 @@ mod tests {
     use crate::{HostError, HostResult};
     use hscrcpy_contracts::{ChannelEndpoint, TransportKind};
     use std::cell::RefCell;
+    use std::fs;
+    use std::path::PathBuf;
 
     #[derive(Default)]
     struct TestRuntime {
@@ -653,6 +655,16 @@ mod tests {
             supported_abis: Vec::new(),
             launch_ability: "EntryAbility".to_string(),
         }
+    }
+
+    fn companion_module_manifest_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../sources/hscrcpy_server/entry/src/main/module.json5")
+    }
+
+    fn companion_app_scope_manifest_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../sources/hscrcpy_server/AppScope/app.json5")
     }
 
     fn installed(
@@ -804,6 +816,40 @@ mod tests {
         let parsed =
             parse_bm_dump_output("cn.magicdian.hscrcpy.server", raw).expect("parse should succeed");
         assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn companion_module_manifest_declares_required_runtime_permissions_once() {
+        let manifest = fs::read_to_string(companion_module_manifest_path())
+            .expect("companion module manifest should be readable");
+        assert_eq!(
+            manifest.matches("\"requestPermissions\"").count(),
+            1,
+            "duplicate requestPermissions keys can make later permission arrays override earlier ones"
+        );
+        assert!(
+            manifest.contains("\"name\": \"ohos.permission.INTERNET\""),
+            "HAP route TCP listeners require ohos.permission.INTERNET"
+        );
+        assert!(
+            manifest.contains("\"name\": \"ohos.permission.TIMEOUT_SCREENOFF_DISABLE_LOCK\""),
+            "host launch should preserve the screen-awake permission beside INTERNET"
+        );
+    }
+
+    #[test]
+    fn bundled_manifest_version_matches_app_scope_manifest() {
+        let manifest = BundledCompanionManifest::mvp();
+        let app_scope = fs::read_to_string(companion_app_scope_manifest_path())
+            .expect("companion app scope manifest should be readable");
+        assert!(
+            app_scope.contains(&format!("\"versionCode\": {}", manifest.version_code)),
+            "host install/update version_code must match the packaged HAP versionCode"
+        );
+        assert!(
+            app_scope.contains(&format!("\"versionName\": \"{}\"", manifest.version_name)),
+            "host install/update version_name must match the packaged HAP versionName"
+        );
     }
 
     #[test]

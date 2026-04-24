@@ -92,6 +92,8 @@ Current MVP runtime manifest values in code:
 |---|---|---|
 | `companion_id` | `cn.magicdian.hscrcpy.server` | `crates/hscrcpy-host/src/companion/mod.rs` |
 | `artifact_path` | `assets/companion/hscrcpy_server.hap` | `crates/hscrcpy-host/src/companion/mod.rs` |
+| `version_name` | `1.0.7` | `crates/hscrcpy-host/src/companion/mod.rs` and `sources/hscrcpy_server/AppScope/app.json5` |
+| `version_code` | `1000007` | `crates/hscrcpy-host/src/companion/mod.rs` and `sources/hscrcpy_server/AppScope/app.json5` |
 | `launch_ability` | `EntryAbility` | `crates/hscrcpy-host/src/companion/mod.rs` |
 
 ### 4.1.1 Current Host Runtime Commands
@@ -128,10 +130,80 @@ Rules:
 * The official `uitest` route must clean stale `xdevice_scrcpy` state plus the active dynamic `tcp:<port> -> localabstract:scrcpy_grpc_socket` or `tcp:<port> -> tcp:5001` forward during startup compensation and graceful shutdown. Ctrl+C/SIGINT during capture is a graceful shutdown request, not a process-abort path.
 * The official `uitest` H.264 stream may begin with non-IDR access units. Host live preview must wait for the first IDR/keyframe before writing to ffplay.
 * While waiting for the first IDR/keyframe, host live preview must cache H.264 decoder configuration NALs (`SPS` type 7 and `PPS` type 8) from pre-IDR access units and write them before the first IDR. Dropping those units causes ffplay startup failures such as `non-existing PPS`.
-* Real-device checks against the official Java `hosScrcpy` API on 2026-04-24 showed that automatic startup calls to `ScrcpyService/onRequestIDRFrame` can close the active `onStart` stream. Keep `onRequestIDRFrame` available as a manual diagnostic/control method, but do not call it by default while waiting for the first decodable frame.
+* The HAP `hscrcpy-server` H.264 encoder must preserve `OH_MD_KEY_CODEC_CONFIG` from `OnEncoderStreamChanged` and codec-data output buffers, normalize avcC decoder config into Annex-B SPS/PPS, and prepend it before IDR access units that do not already carry SPS/PPS. Initialize the native callback runtime before `OH_VideoEncoder_Prepare`/`Start`; some encoders emit stream config during prepare/start, before screen capture itself is started.
+* The HAP `hscrcpy-server` H.264 encoder must configure `OH_MD_KEY_VIDEO_ENCODER_REPEAT_PREVIOUS_FRAME_AFTER` and `OH_MD_KEY_VIDEO_ENCODER_REPEAT_PREVIOUS_MAX_COUNT` so static screens still produce repeated access units. Real-device diagnostics on 2026-04-24 showed the tested encoder producing 33-us timestamp deltas when configured with value `33`, so this route currently uses `33000` as the repeat-after value and logs the raw configured value plus `repeat_previous_after_set` / `repeat_previous_max_set`. Host diagnostics use 120-unit windows, but live preview must not depend on a full diagnostic window before feeding ffplay.
+* Host ffplay preview must favor a visible first frame over aggressive frame dropping. The default live preview command uses raw H.264 input with `-probesize 32`, `-analyzeduration 0`, `-fflags +genpts`, `-flags low_delay`, and `-sync ext`; avoid `-framedrop` / `-fflags nobuffer` until startup visibility is proven on the target platform.
+* H.264 bringup diagnostics must let a single run prove where the first decodable access unit is lost. Native `hscrcpyDiag` must emit startup/config events plus `encoder_access_unit_trace` for the first few access units and keyframes with input/emitted SPS/PPS/IDR counts. Host `events.log` must record `payload_bytes`, `h264_sps`, `h264_pps`, `h264_idr`, and `h264_types` for units handed to ffplay.
+* Real-device checks against the official Java `hosScrcpy` API on 2026-04-24 showed that automatic startup calls to `ScrcpyService/onRequestIDRFrame` can close the active `onStart` stream. Keep `onRequestIDRFrame` available as an opt-in diagnostic/control method (`--uitest-request-idr-on-start`) for static official streams, but do not call it by default while waiting for the first decodable frame.
 * The current `uitest` route uses a standard host-side `tonic` + `prost` generated gRPC client for official `ScrcpyService/onStart`, `onEnd`, and `onRequestIDRFrame`. Protocol-specific generated types stay inside `crates/hscrcpy-host/src/official_scrcpy.rs`; the stream is normalized through `OfficialScrcpyIngressAdapter` into route-neutral H.264 ingress before reaching the bringup renderer / ffplay path.
 * Scrcpy flavor startup should send best-effort `power-shell wakeup` after `onStart`, matching the official Java API startup behavior without mutating screen content.
 * The repo-local schema lives at `crates/hscrcpy-host/proto/scrcpy.proto`. It was reconstructed from the generated descriptor embedded in `xdevice_devicetest-6.1.0.210-py3-none-any.whl/devicetest/controllers/tools/recorder/proto/scrcpy_pb2.py`; it is not a public Huawei `.proto` source file and was not recovered by reverse engineering the device-side `.so`.
+
+### 4.1.2 Official `uitest` Static Startup Fallback Contract
+
+#### Scope / Trigger
+
+Use this contract when improving static-screen startup visibility for `--route uitest`.
+
+#### Signatures
+
+* Existing official H.264 stream:
+  * gRPC method: `/ScrcpyService/onStart`
+  * host adapter: `OfficialScrcpyIngressAdapter::ingest_message(...)`
+  * renderer handoff: `PreparedVideoIngress::H264`
+* Optional official IDR request:
+  * CLI flag: `--uitest-request-idr-on-start`
+  * gRPC method: `/ScrcpyService/onRequestIDRFrame`
+  * host log operations: `official_scrcpy_request_idr`, `official_scrcpy_request_idr_failed`
+* Future startup snapshot fallback:
+  * proposed CLI flag: `--uitest-startup-snapshot-idr`
+  * artifact: `<session_dir>/latest.jpg`
+  * optional synthetic H.264 payload: one Annex-B SPS/PPS/IDR access unit encoded from the snapshot
+
+#### Contracts
+
+* Official `uitest` H.264 may start with SPS/PPS only and must not be considered decodable until an official IDR NAL arrives.
+* A snapshot-derived synthetic IDR may be used only as a visual placeholder before the official stream becomes decodable.
+* A snapshot-derived synthetic IDR must never be used as the reference frame for subsequent official non-IDR units. Host must keep dropping/caching official non-IDR units until an official IDR arrives.
+* After the official IDR arrives, ffplay/live-preview ownership switches to the official stream; subsequent units must be from the same official encoder sequence.
+
+#### Validation & Error Matrix
+
+| Condition | Host behavior | Failure signal |
+|---|---|---|
+| First official unit has SPS/PPS but no IDR | Cache decoder config and wait | `live_preview status=waiting_for_keyframe` |
+| Synthetic snapshot IDR is emitted | Display as placeholder only | event note should mark synthetic source |
+| Official non-IDR arrives before official IDR | Do not feed it after synthetic IDR | host continues waiting for official keyframe |
+| Official IDR arrives | Feed official SPS/PPS/IDR and switch to official stream | `h264_idr=true` in `events.log` |
+| Synthetic encoder dimensions differ from official stream | Prefer preview.html/JPEG fallback or expect decoder reconfigure | visible flash/reconfigure; do not treat as transport bug |
+
+#### Good/Base/Bad Cases
+
+* Good: snapshot placeholder displays immediately, official non-IDR units are withheld, and official IDR switches the stream cleanly.
+* Base: no snapshot fallback is enabled; host waits for official IDR as it does today.
+* Bad: host encodes a screenshot into IDR and then feeds official P frames before any official IDR. The decoder reference state does not match the official encoder's DPB and may produce corruption or stalls.
+
+#### Tests Required
+
+* Unit test: official SPS/PPS-only message remains non-keyframe and live preview waits.
+* Unit test for future snapshot fallback: synthetic IDR does not set the official stream as ready for official P frames.
+* Manual real-device test:
+  * `--route uitest --codec h264` on a static screen waits for official IDR.
+  * `--uitest-request-idr-on-start` logs request result without failing startup.
+
+#### Wrong vs Correct
+
+Wrong:
+
+```text
+synthetic_snapshot_idr -> official_p_frame -> official_p_frame
+```
+
+Correct:
+
+```text
+synthetic_snapshot_idr_placeholder -> drop official non-IDR -> official_sps_pps_idr -> official_p_frame
+```
 
 ### 4.2 Session Channel Messages
 
@@ -207,6 +279,7 @@ Rules:
 * `payload_length` must be positive and must match the number of bytes following the header.
 * For `codec=h264`, payload bytes must be one Annex-B access unit (3-byte or 4-byte start-code delimiters) with at least one valid NAL unit.
 * For `codec=h264` packets marked `is_keyframe=1`, the access unit must include an IDR NAL (`nal_unit_type=5`) so host-side keyframe assumptions stay aligned with decoder expectations.
+* Device-side encoder timestamps must be normalized into protocol microseconds before writing `pts_us`. OpenHarmony H.264 encoder output `attr.pts` is nanosecond-scale on the tested device, so the HAP route divides by 1000 before sending.
 * Future codec tags such as H.266/VVC, VP9, and AV1 must be added through the shared codec registry before either route emits packets for them.
 
 ## 5. Contracts
@@ -258,6 +331,7 @@ Rules:
 * `denied` is fatal for the feature requested by the current session.
 * `unsupported` is fatal unless the host can drop that feature and restart negotiation explicitly.
 * Device-side TCP listeners require `ohos.permission.INTERNET` in `sources/hscrcpy_server/entry/src/main/module.json5`; without it, session bootstrap may fail with `Operation not permitted` before `bind()`.
+* HarmonyOS module permissions must live in one `requestPermissions` array. Adding a second same-named key can cause the packaged manifest to keep only the later array, dropping `ohos.permission.INTERNET` and breaking the HAP route before the host reaches authorization negotiation.
 
 ### 5.3 Startup Handshake Contract
 
@@ -523,6 +597,7 @@ Rules:
 * Integration tests that `session_ready` is emitted before `video` activation and never after a prior `session_error`.
 * Logging assertions for fallback and protocol mismatch paths so failures carry `subsystem`, `operation`, and `session_id`.
 * Device-side bootstrap validation that `EntryAbility.onCreate()` logs `state=listening port=27182 bound=true` after install/run.
+* Static manifest validation that `sources/hscrcpy_server/entry/src/main/module.json5` contains one `requestPermissions` key and includes `ohos.permission.INTERNET` alongside any other shell permissions.
 * Manual bringup checks for the HAP route:
   * `cargo run -p hscrcpy-host-cli -- --device auto --route hscrcpy-server --codec jpeg --max-frames 30 --output-dir /tmp/hscrcpy-preview --no-live-preview`
   * `cargo run -p hscrcpy-host-cli -- --device auto --route hscrcpy-server --codec h264 --max-frames 30 --output-dir /tmp/hscrcpy-preview`

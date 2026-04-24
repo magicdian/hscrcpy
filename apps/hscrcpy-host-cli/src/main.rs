@@ -30,6 +30,7 @@ struct CliOptions {
     output_dir: PathBuf,
     uitest_payload: Option<PathBuf>,
     uitest_flavor: UitestLaunchFlavor,
+    uitest_request_idr_on_start: bool,
 }
 
 impl Default for CliOptions {
@@ -47,6 +48,7 @@ impl Default for CliOptions {
             output_dir: PathBuf::from("target/host-render-bringup"),
             uitest_payload: None,
             uitest_flavor: UitestLaunchFlavor::Scrcpy,
+            uitest_request_idr_on_start: false,
         }
     }
 }
@@ -78,7 +80,7 @@ fn run_bringup(options: CliOptions, interrupt: InterruptFlag) -> HostResult<()> 
     let orchestrator =
         SessionOrchestrator::for_route_with_uitest_config(options.route, uitest_config);
     let enable_control = options.enable_control && options.route != HostRoute::Uitest;
-    let request = match options.requested_codec {
+    let mut request = match options.requested_codec {
         VideoCodec::H264 => {
             SessionStartRequest::h264_mainline(options.preferred_max_fps, enable_control)
         }
@@ -91,6 +93,7 @@ fn run_bringup(options: CliOptions, interrupt: InterruptFlag) -> HostResult<()> 
             ))
         }
     };
+    request.request_official_idr_on_start = options.uitest_request_idr_on_start;
     let bootstrap = SessionBootstrap::new(&options.device_id, request, options.route);
     println!(
         "startup phase=route_start_begin elapsed_ms=0 route={} device={} codec={} fps={} uitest_flavor={}",
@@ -266,11 +269,16 @@ fn capture_frames(
         captured += 1;
         if artifact.frame_index == 1 {
             println!(
-                "captured frame {} codec={} pts_us={} keyframe={} artifact={} startup_elapsed_ms={} first_receive_wait_ms={} first_present_ms={} capture_loop_elapsed_ms={}",
+                "captured frame {} codec={} pts_us={} keyframe={} payload_bytes={} h264_profile={} artifact={} startup_elapsed_ms={} first_receive_wait_ms={} first_present_ms={} capture_loop_elapsed_ms={}",
                 artifact.frame_index,
                 codec_name(&artifact.codec),
                 artifact.timestamp_micros,
                 format_optional_bool(artifact.is_keyframe),
+                artifact.payload_bytes,
+                artifact
+                    .h264_nal_profile
+                    .as_deref()
+                    .unwrap_or("na"),
                 artifact
                     .artifact_path
                     .as_ref()
@@ -367,6 +375,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<CliOptions, String> 
             "--uitest-flavor" => {
                 options.uitest_flavor =
                     parse_uitest_flavor(&next_value(&mut args, "--uitest-flavor")?)?;
+            }
+            "--uitest-request-idr-on-start" => {
+                options.uitest_request_idr_on_start = true;
             }
             "--no-control" => {
                 options.enable_control = false;
@@ -484,9 +495,9 @@ fn print_usage() {
 }
 
 fn usage_text() -> &'static str {
-    "Usage: hscrcpy-host-cli [--device <id>] [--route <uitest|hscrcpy-server>] [--codec <h264|jpeg>] [--fps <n>] [--max-frames <n>] [--output-dir <path>] [--ffplay-bin <path>] [--uitest-flavor <scrcpy|recorder>] [--uitest-payload <path>] [--no-control] [--no-live-preview] [--record-h264]\n\
+    "Usage: hscrcpy-host-cli [--device <id>] [--route <uitest|hscrcpy-server>] [--codec <h264|jpeg>] [--fps <n>] [--max-frames <n>] [--output-dir <path>] [--ffplay-bin <path>] [--uitest-flavor <scrcpy|recorder>] [--uitest-payload <path>] [--uitest-request-idr-on-start] [--no-control] [--no-live-preview] [--record-h264]\n\
 \n\
-Starts a host session, captures negotiated video ingress, and streams H.264 mainline packets into a realtime ffplay preview by default. --fps also sets ffplay's raw H.264 input framerate. Use --record-h264 to additionally write per-frame .h264 diagnostics and stream.h264.\n\
+Starts a host session, captures negotiated video ingress, and streams H.264 mainline packets into a realtime ffplay preview by default. --fps also sets ffplay's raw H.264 input framerate. Use --record-h264 to additionally write per-frame .h264 diagnostics and stream.h264. --uitest-request-idr-on-start is an experimental best-effort ScrcpyService/onRequestIDRFrame call for static official uitest streams.\n\
 \n\
 Examples:\n\
   hscrcpy-host-cli --device auto --route uitest --codec h264 --uitest-payload third_party/hypium/hosScrcpy/6.1.0.210/libscrcpy/libscrcpy_server_unix_6.5-20260313.z.so\n\
@@ -558,5 +569,16 @@ mod tests {
         let options = parse_args(["--record-h264"].into_iter().map(str::to_string))
             .expect("record flag should parse");
         assert!(options.record_h264);
+    }
+
+    #[test]
+    fn parses_uitest_request_idr_on_start_flag() {
+        let options = parse_args(
+            ["--uitest-request-idr-on-start"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("uitest idr flag should parse");
+        assert!(options.uitest_request_idr_on_start);
     }
 }

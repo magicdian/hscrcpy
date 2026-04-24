@@ -37,6 +37,7 @@ pub struct SessionStartRequest {
     pub requested_codec_order: Vec<VideoCodec>,
     pub preferred_max_fps: u16,
     pub enable_control: bool,
+    pub request_official_idr_on_start: bool,
 }
 
 impl SessionStartRequest {
@@ -45,6 +46,7 @@ impl SessionStartRequest {
             requested_codec_order: vec![VideoCodec::H264, VideoCodec::Jpeg],
             preferred_max_fps,
             enable_control,
+            request_official_idr_on_start: false,
         }
     }
 
@@ -53,6 +55,7 @@ impl SessionStartRequest {
             requested_codec_order: vec![VideoCodec::Jpeg],
             preferred_max_fps,
             enable_control,
+            request_official_idr_on_start: false,
         }
     }
 
@@ -547,6 +550,7 @@ mod tests {
         );
         assert_eq!(request.preferred_max_fps, 60);
         assert!(!request.enable_control);
+        assert!(!request.request_official_idr_on_start);
     }
 
     #[test]
@@ -555,6 +559,7 @@ mod tests {
         assert_eq!(request.requested_codec_order, vec![VideoCodec::Jpeg]);
         assert_eq!(request.preferred_max_fps, 30);
         assert!(request.enable_control);
+        assert!(!request.request_official_idr_on_start);
     }
 
     #[test]

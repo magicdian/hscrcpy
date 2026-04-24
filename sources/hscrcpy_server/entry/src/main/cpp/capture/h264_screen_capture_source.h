@@ -55,6 +55,16 @@ private:
         uint64_t non_monotonic_pts_count = 0;
         uint64_t callback_gap_count = 0;
         uint64_t timeline_skew_count = 0;
+        uint64_t stream_changed_count = 0;
+        uint64_t stream_changed_config_count = 0;
+        uint64_t codec_config_parse_failures = 0;
+        uint64_t access_units_with_config = 0;
+        uint64_t idr_with_config_count = 0;
+        uint64_t idr_with_prepended_config_count = 0;
+        uint64_t first_keyframe_index = 0;
+        int64_t start_wall_us = -1;
+        int64_t first_access_unit_after_start_us = -1;
+        int64_t first_keyframe_after_start_us = -1;
         uint64_t dropped_units_last_report = 0;
         uint64_t last_warning_access_unit = 0;
         int64_t last_pts_us = -1;

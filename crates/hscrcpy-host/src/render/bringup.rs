@@ -55,6 +55,8 @@ pub struct RenderedArtifact {
     pub codec: VideoCodec,
     pub timestamp_micros: u64,
     pub is_keyframe: Option<bool>,
+    pub payload_bytes: usize,
+    pub h264_nal_profile: Option<String>,
     pub artifact_path: Option<PathBuf>,
 }
 
@@ -199,7 +201,7 @@ impl BringupRenderSurface {
                             Some(format!("active via {}", preview.command_path()));
                         self.append_event_note(&format!(
                             "live_preview status=active backend=ffplay command={}",
-                            preview.command_path()
+                            preview.command_line()
                         ))?;
                         self.h264_live_preview = Some(preview);
                     }
@@ -310,6 +312,18 @@ impl BringupRenderSurface {
     ) -> HostResult<RenderedArtifact> {
         let frame_index = self.stats.total_units + 1;
         let present_started_at = Instant::now();
+        let h264_profile = h264::access_unit_profile(&access_unit.encoded_bytes);
+        let h264_profile_text = match &h264_profile {
+            Ok(profile) => Some(format!(
+                "nals={} sps={} pps={} idr={} types={}",
+                profile.nal_count,
+                profile.has_sps,
+                profile.has_pps,
+                profile.has_idr,
+                profile.nal_types_csv()
+            )),
+            Err(error) => Some(format!("parse_error={error}")),
+        };
 
         let session_dir = self.require_session_dir()?;
         let frame_path = if self.record_h264_artifacts {
@@ -362,6 +376,8 @@ impl BringupRenderSurface {
             VideoCodec::H264,
             access_unit.timestamp_micros,
             Some(access_unit.is_keyframe),
+            access_unit.encoded_bytes.len(),
+            Some(&h264_profile),
             frame_path.clone(),
         )?;
         self.stats.h264_access_units += 1;
@@ -370,6 +386,8 @@ impl BringupRenderSurface {
             codec: VideoCodec::H264,
             timestamp_micros: access_unit.timestamp_micros,
             is_keyframe: Some(access_unit.is_keyframe),
+            payload_bytes: access_unit.encoded_bytes.len(),
+            h264_nal_profile: h264_profile_text,
             artifact_path: frame_path,
         })
     }
@@ -392,6 +410,8 @@ impl BringupRenderSurface {
             VideoCodec::Jpeg,
             frame.timestamp_micros,
             None,
+            frame.encoded_bytes.len(),
+            None,
             Some(frame_path.clone()),
         )?;
         self.stats.jpeg_frames += 1;
@@ -400,6 +420,8 @@ impl BringupRenderSurface {
             codec: VideoCodec::Jpeg,
             timestamp_micros: frame.timestamp_micros,
             is_keyframe: None,
+            payload_bytes: frame.encoded_bytes.len(),
+            h264_nal_profile: None,
             artifact_path: Some(frame_path),
         })
     }
@@ -414,10 +436,7 @@ impl BringupRenderSurface {
         match preview.present_access_unit(access_unit) {
             Ok(metrics) => Ok(H264LivePreviewResult {
                 write_duration_us: metrics.write_duration_us,
-                note: metrics.waiting_for_keyframe.then(|| {
-                    "live_preview status=waiting_for_keyframe reason=first_h264_access_unit_is_not_idr"
-                        .to_string()
-                }),
+                note: metrics.event_note,
                 error: None,
             }),
             Err(error) => {
@@ -437,6 +456,8 @@ impl BringupRenderSurface {
         codec: VideoCodec,
         timestamp_micros: u64,
         is_keyframe: Option<bool>,
+        payload_bytes: usize,
+        h264_profile: Option<&HostResult<h264::H264AccessUnitProfile>>,
         artifact_path: Option<PathBuf>,
     ) -> HostResult<()> {
         let event_path = self.require_session_dir()?.join("events.log");
@@ -448,15 +469,44 @@ impl BringupRenderSurface {
         let artifact_value = artifact_path
             .as_ref()
             .map_or_else(|| "disabled".to_string(), |path| path.display().to_string());
-        writeln!(
-            log,
-            "frame={} codec={} pts_us={} keyframe={} artifact={}",
-            frame_index,
-            codec_name(&codec),
-            timestamp_micros,
-            format_optional_bool(is_keyframe),
-            artifact_value
-        )
+        match h264_profile {
+            Some(Ok(profile)) => writeln!(
+                log,
+                "frame={} codec={} pts_us={} keyframe={} payload_bytes={} h264_nals={} h264_sps={} h264_pps={} h264_idr={} h264_types={} artifact={}",
+                frame_index,
+                codec_name(&codec),
+                timestamp_micros,
+                format_optional_bool(is_keyframe),
+                payload_bytes,
+                profile.nal_count,
+                profile.has_sps,
+                profile.has_pps,
+                profile.has_idr,
+                profile.nal_types_csv(),
+                artifact_value
+            ),
+            Some(Err(error)) => writeln!(
+                log,
+                "frame={} codec={} pts_us={} keyframe={} payload_bytes={} h264_parse_error={} artifact={}",
+                frame_index,
+                codec_name(&codec),
+                timestamp_micros,
+                format_optional_bool(is_keyframe),
+                payload_bytes,
+                error,
+                artifact_value
+            ),
+            None => writeln!(
+                log,
+                "frame={} codec={} pts_us={} keyframe={} payload_bytes={} artifact={}",
+                frame_index,
+                codec_name(&codec),
+                timestamp_micros,
+                format_optional_bool(is_keyframe),
+                payload_bytes,
+                artifact_value
+            ),
+        }
         .map_err(|error| io_error("append render event log", &event_path, error))?;
 
         self.stats.total_units = frame_index;
@@ -505,17 +555,19 @@ impl BringupRenderSurface {
 
 struct H264LivePreview {
     command_path: String,
+    command_args: Vec<String>,
     child: Child,
     stdin: Option<ChildStdin>,
     received_keyframe: bool,
     logged_waiting_for_keyframe: bool,
+    logged_preview_started: bool,
     pending_decoder_config: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct H264LivePreviewMetrics {
     write_duration_us: Option<u64>,
-    waiting_for_keyframe: bool,
+    event_note: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -707,22 +759,31 @@ impl H264LivePreview {
             .try_clone()
             .map_err(|error| io_error("clone live preview log handle", &log_path, error))?;
 
+        let args = vec![
+            "-loglevel".to_string(),
+            "info".to_string(),
+            "-probesize".to_string(),
+            "32".to_string(),
+            "-analyzeduration".to_string(),
+            "0".to_string(),
+            "-fflags".to_string(),
+            "+genpts".to_string(),
+            "-flags".to_string(),
+            "low_delay".to_string(),
+            "-sync".to_string(),
+            "ext".to_string(),
+            "-window_title".to_string(),
+            format!("hscrcpy {}", session.session_id),
+            "-framerate".to_string(),
+            config.framerate.to_string(),
+            "-f".to_string(),
+            "h264".to_string(),
+            "-i".to_string(),
+            "pipe:0".to_string(),
+        ];
+
         let mut child = Command::new(&config.ffplay_bin)
-            .arg("-loglevel")
-            .arg("warning")
-            .arg("-fflags")
-            .arg("nobuffer")
-            .arg("-flags")
-            .arg("low_delay")
-            .arg("-framedrop")
-            .arg("-window_title")
-            .arg(format!("hscrcpy {}", session.session_id))
-            .arg("-framerate")
-            .arg(config.framerate.to_string())
-            .arg("-f")
-            .arg("h264")
-            .arg("-i")
-            .arg("pipe:0")
+            .args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_file_err))
@@ -742,16 +803,25 @@ impl H264LivePreview {
 
         Ok(Self {
             command_path: config.ffplay_bin.clone(),
+            command_args: args,
             child,
             stdin: Some(stdin),
             received_keyframe: false,
             logged_waiting_for_keyframe: false,
+            logged_preview_started: false,
             pending_decoder_config: Vec::new(),
         })
     }
 
     fn command_path(&self) -> &str {
         &self.command_path
+    }
+
+    fn command_line(&self) -> String {
+        std::iter::once(self.command_path.as_str())
+            .chain(self.command_args.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     fn present_access_unit(
@@ -767,13 +837,21 @@ impl H264LivePreview {
             self.logged_waiting_for_keyframe = true;
             return Ok(H264LivePreviewMetrics {
                 write_duration_us: None,
-                waiting_for_keyframe: should_log,
+                event_note: should_log.then(|| {
+                    format!(
+                        "live_preview status=waiting_for_keyframe reason=first_h264_access_unit_is_not_idr decoder_config_cached_bytes={}",
+                        self.pending_decoder_config.len()
+                    )
+                }),
             });
         }
+        let mut decoder_config_bytes = 0usize;
         if !self.received_keyframe {
             let config = h264::decoder_config_bytes(&access_unit.encoded_bytes)?;
             if !config.is_empty() {
-                self.pending_decoder_config = config;
+                self.pending_decoder_config.clear();
+            } else {
+                decoder_config_bytes = self.pending_decoder_config.len();
             }
             self.received_keyframe = true;
         }
@@ -805,9 +883,18 @@ impl H264LivePreview {
                     self.command_path
                 ))
             })?;
+        let should_log_started = !self.logged_preview_started;
+        self.logged_preview_started = true;
         Ok(H264LivePreviewMetrics {
             write_duration_us: Some(duration_to_u64_micros(write_started_at.elapsed())),
-            waiting_for_keyframe: false,
+            event_note: should_log_started.then(|| {
+                format!(
+                    "live_preview status=started keyframe={} decoder_config_bytes={} access_unit_bytes={}",
+                    access_unit.is_keyframe,
+                    decoder_config_bytes,
+                    access_unit.encoded_bytes.len()
+                )
+            }),
         })
     }
 }
@@ -1034,7 +1121,7 @@ mod tests {
         assert!(
             fs::read_to_string(session_dir.join("events.log"))
                 .expect("events log should exist")
-                .contains("keyframe=true artifact=disabled"),
+                .contains("keyframe=true payload_bytes=4 h264_parse_error="),
             "events.log should record disabled artifact state"
         );
     }

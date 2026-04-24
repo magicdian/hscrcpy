@@ -23,11 +23,24 @@ static constexpr int32_t kDefaultAudioSampleRate = 48000;
 static constexpr int32_t kDefaultAudioChannels = 2;
 static constexpr int32_t kDefaultAudioBitrate = 128000;
 static constexpr int32_t kDefaultIFrameIntervalMs = 2000;
+static constexpr int32_t kRepeatPreviousFrameAfterUs = 33000;
+static constexpr int32_t kRepeatPreviousMaxCount = 1000000;
+static constexpr int64_t kNanosecondsPerMicrosecond = 1000;
 static constexpr uint64_t kCallbackSummaryEveryAccessUnits = 120;
+static constexpr uint64_t kStartupAccessUnitTraceLimit = 5;
 static constexpr int64_t kCallbackGapWarnUs = 200000;
 static constexpr int64_t kTimelineSkewWarnUs = 120000;
 static constexpr uint64_t kAnomalyWarnThrottleAccessUnits = 120;
 static constexpr size_t kLargePayloadWarnBytes = 512 * 1024;
+static constexpr size_t kNalTypesTraceLimit = 16;
+
+struct NalInspection {
+    uint64_t nal_count = 0;
+    uint64_t sps_count = 0;
+    uint64_t pps_count = 0;
+    uint64_t idr_count = 0;
+    std::string nal_types;
+};
 
 struct CallbackSummarySnapshot {
     uint64_t callback_count = 0;
@@ -40,6 +53,15 @@ struct CallbackSummarySnapshot {
     uint64_t non_monotonic_pts_count = 0;
     uint64_t callback_gap_count = 0;
     uint64_t timeline_skew_count = 0;
+    uint64_t stream_changed_count = 0;
+    uint64_t stream_changed_config_count = 0;
+    uint64_t codec_config_parse_failures = 0;
+    uint64_t access_units_with_config = 0;
+    uint64_t idr_with_config_count = 0;
+    uint64_t idr_with_prepended_config_count = 0;
+    uint64_t first_keyframe_index = 0;
+    int64_t first_access_unit_after_start_us = -1;
+    int64_t first_keyframe_after_start_us = -1;
     uint64_t pts_step_samples = 0;
     uint64_t callback_step_samples = 0;
     uint64_t avg_pts_step_us = 0;
@@ -59,6 +81,22 @@ struct CallbackAnomalySnapshot {
     uint64_t queue_depth = 0;
     uint64_t dropped_units = 0;
     uint32_t attr_flags = 0;
+};
+
+struct AccessUnitTraceSnapshot {
+    const char *kind = "";
+    uint64_t access_unit_index = 0;
+    int64_t pts_us = 0;
+    int64_t raw_pts = 0;
+    int64_t after_start_us = -1;
+    size_t payload_bytes = 0;
+    size_t emitted_bytes = 0;
+    size_t pending_config_bytes_before = 0;
+    size_t prepended_config_bytes = 0;
+    uint64_t queue_depth = 0;
+    uint32_t attr_flags = 0;
+    NalInspection input_nals = {};
+    NalInspection emitted_nals = {};
 };
 
 std::string BuildOperationError(const std::string &operation, const std::string &message)
@@ -114,12 +152,170 @@ bool ContainsIdrNalUnit(const std::vector<uint8_t> &bytes)
     return false;
 }
 
+bool ContainsDecoderConfigNalUnit(const std::vector<uint8_t> &bytes)
+{
+    for (size_t index = 0; index + 3 < bytes.size(); ++index) {
+        size_t nal_offset = 0;
+        if (!StartsWithStartCode(bytes, index, &nal_offset)) {
+            continue;
+        }
+        if (nal_offset >= bytes.size()) {
+            continue;
+        }
+        const uint8_t nal_type = bytes[nal_offset] & 0x1F;
+        if (nal_type == 7 || nal_type == 8) {
+            return true;
+        }
+    }
+    return false;
+}
+
+NalInspection InspectAnnexBNalUnits(const std::vector<uint8_t> &bytes)
+{
+    NalInspection inspection = {};
+    std::ostringstream types;
+    for (size_t cursor = 0; cursor < bytes.size();) {
+        size_t nal_offset = 0;
+        if (!StartsWithStartCode(bytes, cursor, &nal_offset)) {
+            ++cursor;
+            continue;
+        }
+        if (nal_offset >= bytes.size()) {
+            break;
+        }
+        const uint8_t nal_type = bytes[nal_offset] & 0x1F;
+        if (inspection.nal_count < kNalTypesTraceLimit) {
+            if (!inspection.nal_types.empty()) {
+                types << ",";
+            }
+            types << static_cast<unsigned int>(nal_type);
+            inspection.nal_types = types.str();
+        }
+        ++inspection.nal_count;
+        if (nal_type == 7) {
+            ++inspection.sps_count;
+        } else if (nal_type == 8) {
+            ++inspection.pps_count;
+        } else if (nal_type == 5) {
+            ++inspection.idr_count;
+        }
+
+        size_t next_start_code_offset = bytes.size();
+        for (size_t index = nal_offset; index + 3 < bytes.size(); ++index) {
+            size_t ignored = 0;
+            if (StartsWithStartCode(bytes, index, &ignored)) {
+                next_start_code_offset = index;
+                break;
+            }
+        }
+        cursor = next_start_code_offset;
+    }
+    if (inspection.nal_count > kNalTypesTraceLimit) {
+        types << ",...";
+        inspection.nal_types = types.str();
+    }
+    return inspection;
+}
+
 void AppendBytes(const std::vector<uint8_t> &source, std::vector<uint8_t> *target)
 {
     if (target == nullptr || source.empty()) {
         return;
     }
     target->insert(target->end(), source.begin(), source.end());
+}
+
+void AppendAnnexBStartCode(std::vector<uint8_t> *target)
+{
+    static constexpr uint8_t kStartCode[] = {0x00, 0x00, 0x00, 0x01};
+    if (target == nullptr) {
+        return;
+    }
+    target->insert(target->end(), kStartCode, kStartCode + sizeof(kStartCode));
+}
+
+bool ExtractAnnexBDecoderConfig(const std::vector<uint8_t> &payload, std::vector<uint8_t> *config)
+{
+    if (config == nullptr) {
+        return false;
+    }
+    config->clear();
+    size_t cursor = 0;
+    while (cursor < payload.size()) {
+        size_t nal_offset = 0;
+        if (!StartsWithStartCode(payload, cursor, &nal_offset)) {
+            ++cursor;
+            continue;
+        }
+        const size_t start_code_offset = cursor;
+        const size_t next_start_code_offset = [&payload, nal_offset]() {
+            for (size_t index = nal_offset; index + 3 < payload.size(); ++index) {
+                size_t ignored = 0;
+                if (StartsWithStartCode(payload, index, &ignored)) {
+                    return index;
+                }
+            }
+            return payload.size();
+        }();
+        if (nal_offset < payload.size()) {
+            const uint8_t nal_type = payload[nal_offset] & 0x1F;
+            if (nal_type == 7 || nal_type == 8) {
+                config->insert(config->end(), payload.data() + start_code_offset, payload.data() + next_start_code_offset);
+            }
+        }
+        cursor = next_start_code_offset;
+    }
+    return !config->empty();
+}
+
+bool ExtractAvcCDecoderConfig(const std::vector<uint8_t> &payload, std::vector<uint8_t> *config)
+{
+    if (config == nullptr || payload.size() < 7 || payload[0] != 1) {
+        return false;
+    }
+    config->clear();
+    size_t cursor = 5;
+    const uint8_t sps_count = payload[cursor++] & 0x1F;
+    for (uint8_t index = 0; index < sps_count; ++index) {
+        if (cursor + 2 > payload.size()) {
+            config->clear();
+            return false;
+        }
+        const size_t nal_size = (static_cast<size_t>(payload[cursor]) << 8) | payload[cursor + 1];
+        cursor += 2;
+        if (nal_size == 0 || cursor + nal_size > payload.size()) {
+            config->clear();
+            return false;
+        }
+        AppendAnnexBStartCode(config);
+        config->insert(config->end(), payload.data() + cursor, payload.data() + cursor + nal_size);
+        cursor += nal_size;
+    }
+    if (cursor >= payload.size()) {
+        return !config->empty();
+    }
+    const uint8_t pps_count = payload[cursor++];
+    for (uint8_t index = 0; index < pps_count; ++index) {
+        if (cursor + 2 > payload.size()) {
+            config->clear();
+            return false;
+        }
+        const size_t nal_size = (static_cast<size_t>(payload[cursor]) << 8) | payload[cursor + 1];
+        cursor += 2;
+        if (nal_size == 0 || cursor + nal_size > payload.size()) {
+            config->clear();
+            return false;
+        }
+        AppendAnnexBStartCode(config);
+        config->insert(config->end(), payload.data() + cursor, payload.data() + cursor + nal_size);
+        cursor += nal_size;
+    }
+    return !config->empty();
+}
+
+bool ExtractDecoderConfig(const std::vector<uint8_t> &payload, std::vector<uint8_t> *config)
+{
+    return ExtractAnnexBDecoderConfig(payload, config) || ExtractAvcCDecoderConfig(payload, config);
 }
 
 bool ShouldEmitCallbackSummary(uint64_t access_unit_count)
@@ -152,7 +348,9 @@ void LogCallbackSummary(const std::string &session_id, const CallbackSummarySnap
         "session_id=%s callbacks=%llu access_units=%llu keyframes=%llu keyframe_pct=%llu payload_bytes_total=%llu "
         "payload_bytes_avg=%llu codec_config_units=%llu dropped_units=%llu queue_depth=%llu queue_depth_max=%llu "
         "pts_step_avg_us=%llu callback_step_avg_us=%llu pts_non_monotonic=%llu callback_gap_warns=%llu "
-        "timeline_skew_warns=%llu",
+        "timeline_skew_warns=%llu stream_changed=%llu stream_changed_config=%llu codec_config_parse_failures=%llu "
+        "access_units_with_config=%llu idr_with_config=%llu idr_with_prepended_config=%llu first_keyframe_idx=%llu "
+        "first_access_unit_after_start_us=%lld first_keyframe_after_start_us=%lld",
         session_id.c_str(),
         static_cast<unsigned long long>(snapshot.callback_count),
         static_cast<unsigned long long>(snapshot.access_unit_count),
@@ -168,7 +366,16 @@ void LogCallbackSummary(const std::string &session_id, const CallbackSummarySnap
         static_cast<unsigned long long>(snapshot.avg_callback_step_us),
         static_cast<unsigned long long>(snapshot.non_monotonic_pts_count),
         static_cast<unsigned long long>(snapshot.callback_gap_count),
-        static_cast<unsigned long long>(snapshot.timeline_skew_count));
+        static_cast<unsigned long long>(snapshot.timeline_skew_count),
+        static_cast<unsigned long long>(snapshot.stream_changed_count),
+        static_cast<unsigned long long>(snapshot.stream_changed_config_count),
+        static_cast<unsigned long long>(snapshot.codec_config_parse_failures),
+        static_cast<unsigned long long>(snapshot.access_units_with_config),
+        static_cast<unsigned long long>(snapshot.idr_with_config_count),
+        static_cast<unsigned long long>(snapshot.idr_with_prepended_config_count),
+        static_cast<unsigned long long>(snapshot.first_keyframe_index),
+        static_cast<long long>(snapshot.first_access_unit_after_start_us),
+        static_cast<long long>(snapshot.first_keyframe_after_start_us));
 }
 
 void LogCallbackAnomaly(const std::string &session_id, const CallbackAnomalySnapshot &anomaly)
@@ -190,6 +397,39 @@ void LogCallbackAnomaly(const std::string &session_id, const CallbackAnomalySnap
         static_cast<unsigned long long>(anomaly.queue_depth),
         static_cast<unsigned long long>(anomaly.dropped_units),
         anomaly.attr_flags);
+}
+
+void LogAccessUnitTrace(const std::string &session_id, const AccessUnitTraceSnapshot &trace)
+{
+    core::diag::Info(
+        "capture/h264_screen_capture_source",
+        "encoder_access_unit_trace",
+        "session_id=%s kind=%s frame_idx=%llu pts_us=%lld raw_pts=%lld after_start_us=%lld payload_bytes=%zu "
+        "emitted_bytes=%zu pending_config_before=%zu prepended_config_bytes=%zu flags=0x%X queue_depth=%llu "
+        "input_nals=%llu input_sps=%llu input_pps=%llu input_idr=%llu input_types=%s "
+        "emitted_nals=%llu emitted_sps=%llu emitted_pps=%llu emitted_idr=%llu emitted_types=%s",
+        session_id.c_str(),
+        trace.kind,
+        static_cast<unsigned long long>(trace.access_unit_index),
+        static_cast<long long>(trace.pts_us),
+        static_cast<long long>(trace.raw_pts),
+        static_cast<long long>(trace.after_start_us),
+        trace.payload_bytes,
+        trace.emitted_bytes,
+        trace.pending_config_bytes_before,
+        trace.prepended_config_bytes,
+        trace.attr_flags,
+        static_cast<unsigned long long>(trace.queue_depth),
+        static_cast<unsigned long long>(trace.input_nals.nal_count),
+        static_cast<unsigned long long>(trace.input_nals.sps_count),
+        static_cast<unsigned long long>(trace.input_nals.pps_count),
+        static_cast<unsigned long long>(trace.input_nals.idr_count),
+        trace.input_nals.nal_types.empty() ? "none" : trace.input_nals.nal_types.c_str(),
+        static_cast<unsigned long long>(trace.emitted_nals.nal_count),
+        static_cast<unsigned long long>(trace.emitted_nals.sps_count),
+        static_cast<unsigned long long>(trace.emitted_nals.pps_count),
+        static_cast<unsigned long long>(trace.emitted_nals.idr_count),
+        trace.emitted_nals.nal_types.empty() ? "none" : trace.emitted_nals.nal_types.c_str());
 }
 
 }  // namespace
@@ -275,7 +515,26 @@ bool ScreenCaptureSource::Start(const core::VideoTransportState &state, std::str
         state.config.has_iframe_interval_ms && state.config.iframe_interval_ms > 0 ?
             state.config.iframe_interval_ms :
             kDefaultIFrameIntervalMs;
+    const bool repeat_after_set = OH_AVFormat_SetIntValue(
+        encoder_format, OH_MD_KEY_VIDEO_ENCODER_REPEAT_PREVIOUS_FRAME_AFTER, kRepeatPreviousFrameAfterUs);
+    const bool repeat_max_set = OH_AVFormat_SetIntValue(
+        encoder_format, OH_MD_KEY_VIDEO_ENCODER_REPEAT_PREVIOUS_MAX_COUNT, kRepeatPreviousMaxCount);
     (void)OH_AVFormat_SetIntValue(encoder_format, OH_MD_KEY_I_FRAME_INTERVAL, iframe_interval_ms);
+
+    core::diag::Info(
+        "capture/h264_screen_capture_source",
+        "start_config",
+        "session_id=%s width=%d height=%d frame_rate=%d bitrate=%lld iframe_interval_ms=%d repeat_previous_frame_after_value=%d repeat_previous_after_set=%d repeat_previous_max_count=%d repeat_previous_max_set=%d",
+        state.session_id.c_str(),
+        static_cast<int>(configuration.width),
+        static_cast<int>(configuration.height),
+        static_cast<int>(configuration.frame_rate),
+        static_cast<long long>(configuration.bitrate),
+        static_cast<int>(iframe_interval_ms),
+        static_cast<int>(kRepeatPreviousFrameAfterUs),
+        repeat_after_set ? 1 : 0,
+        static_cast<int>(kRepeatPreviousMaxCount),
+        repeat_max_set ? 1 : 0);
 
     const OH_AVErrCode configure_result = OH_VideoEncoder_Configure(encoder_, encoder_format);
     OH_AVFormat_Destroy(encoder_format);
@@ -308,6 +567,19 @@ bool ScreenCaptureSource::Start(const core::VideoTransportState &state, std::str
         }
         Stop();
         return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        started_ = true;
+        running_ = true;
+        session_id_ = state.session_id;
+        fatal_error_.clear();
+        dropped_units_ = 0;
+        callback_diag_ = {};
+        callback_diag_.start_wall_us = core::diag::NowSteadyTimeUs();
+        queue_.clear();
+        pending_codec_config_.clear();
     }
 
     const OH_AVErrCode prepare_result = OH_VideoEncoder_Prepare(encoder_);
@@ -388,18 +660,6 @@ bool ScreenCaptureSource::Start(const core::VideoTransportState &state, std::str
 
     (void)OH_AVScreenCapture_SetMicrophoneEnabled(capture_, false);
 
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        started_ = true;
-        running_ = true;
-        session_id_ = state.session_id;
-        fatal_error_.clear();
-        dropped_units_ = 0;
-        callback_diag_ = {};
-        queue_.clear();
-        pending_codec_config_.clear();
-    }
-
     const OH_AVSCREEN_CAPTURE_ErrCode capture_start_result =
         OH_AVScreenCapture_StartScreenCaptureWithSurface(capture_, encoder_surface_);
     if (capture_start_result != AV_SCREEN_CAPTURE_ERR_OK) {
@@ -433,6 +693,15 @@ void ScreenCaptureSource::Stop()
             summary_snapshot.non_monotonic_pts_count = callback_diag_.non_monotonic_pts_count;
             summary_snapshot.callback_gap_count = callback_diag_.callback_gap_count;
             summary_snapshot.timeline_skew_count = callback_diag_.timeline_skew_count;
+            summary_snapshot.stream_changed_count = callback_diag_.stream_changed_count;
+            summary_snapshot.stream_changed_config_count = callback_diag_.stream_changed_config_count;
+            summary_snapshot.codec_config_parse_failures = callback_diag_.codec_config_parse_failures;
+            summary_snapshot.access_units_with_config = callback_diag_.access_units_with_config;
+            summary_snapshot.idr_with_config_count = callback_diag_.idr_with_config_count;
+            summary_snapshot.idr_with_prepended_config_count = callback_diag_.idr_with_prepended_config_count;
+            summary_snapshot.first_keyframe_index = callback_diag_.first_keyframe_index;
+            summary_snapshot.first_access_unit_after_start_us = callback_diag_.first_access_unit_after_start_us;
+            summary_snapshot.first_keyframe_after_start_us = callback_diag_.first_keyframe_after_start_us;
             summary_snapshot.pts_step_samples = callback_diag_.pts_step_samples;
             summary_snapshot.callback_step_samples = callback_diag_.callback_step_samples;
             summary_snapshot.avg_pts_step_us = callback_diag_.pts_step_samples == 0 ?
@@ -534,6 +803,13 @@ void ScreenCaptureSource::OnCaptureStateChange(
         return;
     }
 
+    core::diag::Info(
+        "capture/h264_screen_capture_source",
+        "capture_state",
+        "session_id=%s state_code=%d",
+        context->owner->session_id_.c_str(),
+        static_cast<int>(state_code));
+
     if (state_code == OH_SCREEN_CAPTURE_STATE_CANCELED ||
         state_code == OH_SCREEN_CAPTURE_STATE_STOPPED_BY_USER ||
         state_code == OH_SCREEN_CAPTURE_STATE_INTERRUPTED_BY_OTHER ||
@@ -576,8 +852,65 @@ void ScreenCaptureSource::OnEncoderError(struct OH_AVCodec *codec, int32_t error
 void ScreenCaptureSource::OnEncoderStreamChanged(struct OH_AVCodec *codec, struct OH_AVFormat *format, void *user_data)
 {
     (void)codec;
-    (void)format;
-    (void)user_data;
+    CallbackContext *context = static_cast<CallbackContext *>(user_data);
+    if (context == nullptr || context->owner == nullptr || format == nullptr) {
+        return;
+    }
+
+    std::string session_id;
+    {
+        std::lock_guard<std::mutex> lock(context->owner->mutex_);
+        if (!context->owner->IsRunningLocked()) {
+            return;
+        }
+        ++context->owner->callback_diag_.stream_changed_count;
+        session_id = context->owner->session_id_;
+    }
+
+    uint8_t *codec_config = nullptr;
+    size_t codec_config_size = 0;
+    if (!OH_AVFormat_GetBuffer(format, OH_MD_KEY_CODEC_CONFIG, &codec_config, &codec_config_size) ||
+        codec_config == nullptr || codec_config_size == 0) {
+        core::diag::Warn(
+            "capture/h264_screen_capture_source",
+            "encoder_stream_changed",
+            "session_id=%s has_codec_config=0 codec_config_bytes=%zu",
+            session_id.c_str(),
+            codec_config_size);
+        return;
+    }
+
+    std::vector<uint8_t> payload(codec_config, codec_config + codec_config_size);
+    std::vector<uint8_t> annex_b_config;
+    if (!ExtractDecoderConfig(payload, &annex_b_config)) {
+        {
+            std::lock_guard<std::mutex> lock(context->owner->mutex_);
+            ++context->owner->callback_diag_.codec_config_parse_failures;
+        }
+        core::diag::Warn(
+            "capture/h264_screen_capture_source",
+            "encoder_stream_changed",
+            "session_id=%s has_codec_config=1 codec_config_bytes=%zu parse_result=failed",
+            session_id.c_str(),
+            codec_config_size);
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(context->owner->mutex_);
+    if (!context->owner->IsRunningLocked()) {
+        return;
+    }
+    context->owner->pending_codec_config_ = std::move(annex_b_config);
+    ++context->owner->callback_diag_.codec_config_count;
+    ++context->owner->callback_diag_.stream_changed_config_count;
+    const size_t pending_bytes = context->owner->pending_codec_config_.size();
+    core::diag::Info(
+        "capture/h264_screen_capture_source",
+        "encoder_stream_changed",
+        "session_id=%s has_codec_config=1 codec_config_bytes=%zu annexb_config_bytes=%zu parse_result=ok",
+        context->owner->session_id_.c_str(),
+        codec_config_size,
+        pending_bytes);
 }
 
 void ScreenCaptureSource::OnEncoderNeedInputBuffer(
@@ -602,8 +935,10 @@ void ScreenCaptureSource::OnEncoderOutputBuffer(
     bool should_notify = false;
     bool should_log_summary = false;
     bool should_log_anomaly = false;
+    bool should_log_access_unit_trace = false;
     CallbackSummarySnapshot summary_snapshot = {};
     CallbackAnomalySnapshot anomaly_snapshot = {};
+    AccessUnitTraceSnapshot access_unit_trace = {};
     std::string session_id;
     int64_t callback_step_us = -1;
     bool callback_gap_detected = false;
@@ -643,21 +978,53 @@ void ScreenCaptureSource::OnEncoderOutputBuffer(
                         address + static_cast<size_t>(attr.offset),
                         address + static_cast<size_t>(attr.offset + attr.size));
                     const bool has_idr = ContainsIdrNalUnit(payload);
+                    const bool has_decoder_config = ContainsDecoderConfigNalUnit(payload);
                     const bool is_codec_data = (attr.flags & AVCODEC_BUFFER_FLAGS_CODEC_DATA) != 0;
 
                     std::lock_guard<std::mutex> lock(owner->mutex_);
                     if (owner->IsRunningLocked()) {
                         CallbackDiagnostics &diag = owner->callback_diag_;
-                        if (is_codec_data && !has_idr) {
-                            ++diag.codec_config_count;
-                            owner->pending_codec_config_ = std::move(payload);
+                        if (is_codec_data) {
+                            std::vector<uint8_t> decoder_config;
+                            if (ExtractDecoderConfig(payload, &decoder_config)) {
+                                ++diag.codec_config_count;
+                                owner->pending_codec_config_ = std::move(decoder_config);
+                                core::diag::Info(
+                                    "capture/h264_screen_capture_source",
+                                    "encoder_codec_config",
+                                    "session_id=%s source=output_buffer flags=0x%X codec_config_bytes=%zu annexb_config_bytes=%zu",
+                                    owner->session_id_.c_str(),
+                                    static_cast<unsigned int>(attr.flags),
+                                    payload.size(),
+                                    owner->pending_codec_config_.size());
+                            } else {
+                                ++diag.codec_config_parse_failures;
+                                core::diag::Warn(
+                                    "capture/h264_screen_capture_source",
+                                    "encoder_codec_config",
+                                    "session_id=%s source=output_buffer flags=0x%X codec_config_bytes=%zu parse_result=failed",
+                                    owner->session_id_.c_str(),
+                                    static_cast<unsigned int>(attr.flags),
+                                    payload.size());
+                            }
                         } else {
                             AccessUnit unit = {};
-                            unit.pts_us = attr.pts >= 0 ? attr.pts : 0;
+                            unit.pts_us = attr.pts >= 0 ? (attr.pts / kNanosecondsPerMicrosecond) : 0;
                             unit.is_keyframe = has_idr;
+                            const NalInspection input_nals = InspectAnnexBNalUnits(payload);
+                            const size_t pending_config_bytes_before = owner->pending_codec_config_.size();
+                            size_t prepended_config_bytes = 0;
 
-                            if (has_idr && !owner->pending_codec_config_.empty() && !is_codec_data) {
+                            if (has_decoder_config) {
+                                std::vector<uint8_t> decoder_config;
+                                if (ExtractDecoderConfig(payload, &decoder_config)) {
+                                    owner->pending_codec_config_ = std::move(decoder_config);
+                                }
+                            }
+
+                            if (has_idr && !has_decoder_config && !owner->pending_codec_config_.empty()) {
                                 unit.bytes.reserve(owner->pending_codec_config_.size() + payload.size());
+                                prepended_config_bytes = owner->pending_codec_config_.size();
                                 AppendBytes(owner->pending_codec_config_, &unit.bytes);
                                 AppendBytes(payload, &unit.bytes);
                             } else {
@@ -667,6 +1034,7 @@ void ScreenCaptureSource::OnEncoderOutputBuffer(
                             if (has_idr) {
                                 owner->pending_codec_config_.clear();
                             }
+                            const NalInspection emitted_nals = InspectAnnexBNalUnits(unit.bytes);
 
                             const int64_t previous_pts_us = diag.last_pts_us;
                             int64_t delta_pts_us = 0;
@@ -694,12 +1062,55 @@ void ScreenCaptureSource::OnEncoderOutputBuffer(
                             ++diag.access_unit_count;
                             if (unit.is_keyframe) {
                                 ++diag.keyframe_count;
+                                if (diag.first_keyframe_index == 0) {
+                                    diag.first_keyframe_index = diag.access_unit_count;
+                                }
+                            }
+                            if (has_decoder_config) {
+                                ++diag.access_units_with_config;
+                            }
+                            if (has_idr && has_decoder_config) {
+                                ++diag.idr_with_config_count;
+                            }
+                            if (has_idr && prepended_config_bytes > 0) {
+                                ++diag.idr_with_prepended_config_count;
+                            }
+                            const int64_t after_start_us =
+                                diag.start_wall_us >= 0 ? (callback_wall_us - diag.start_wall_us) : -1;
+                            if (diag.first_access_unit_after_start_us < 0) {
+                                diag.first_access_unit_after_start_us = after_start_us;
+                            }
+                            if (unit.is_keyframe && diag.first_keyframe_after_start_us < 0) {
+                                diag.first_keyframe_after_start_us = after_start_us;
                             }
                             diag.total_payload_bytes += static_cast<uint64_t>(payload_bytes);
+
+                            const bool trace_startup_unit =
+                                diag.access_unit_count <= kStartupAccessUnitTraceLimit;
+                            const bool trace_keyframe = unit.is_keyframe;
+                            if (trace_startup_unit || trace_keyframe || has_decoder_config || prepended_config_bytes > 0) {
+                                access_unit_trace.kind = trace_keyframe ?
+                                    (trace_startup_unit ? "startup_keyframe" : "keyframe") :
+                                    (has_decoder_config ? "decoder_config_unit" : "startup");
+                                access_unit_trace.access_unit_index = diag.access_unit_count;
+                                access_unit_trace.pts_us = unit.pts_us;
+                                access_unit_trace.raw_pts = attr.pts;
+                                access_unit_trace.after_start_us = after_start_us;
+                                access_unit_trace.payload_bytes = static_cast<size_t>(attr.size);
+                                access_unit_trace.emitted_bytes = payload_bytes;
+                                access_unit_trace.pending_config_bytes_before = pending_config_bytes_before;
+                                access_unit_trace.prepended_config_bytes = prepended_config_bytes;
+                                access_unit_trace.attr_flags = static_cast<uint32_t>(attr.flags);
+                                access_unit_trace.input_nals = input_nals;
+                                access_unit_trace.emitted_nals = emitted_nals;
+                                session_id = owner->session_id_;
+                                should_log_access_unit_trace = true;
+                            }
 
                             owner->PushAccessUnitLocked(std::move(unit));
                             diag.max_queue_depth =
                                 std::max<uint64_t>(diag.max_queue_depth, static_cast<uint64_t>(owner->queue_.size()));
+                            access_unit_trace.queue_depth = owner->queue_.size();
 
                             const bool queue_pressure = owner->queue_.size() >= kMaxQueuedAccessUnits;
                             const bool large_payload = payload_bytes >= kLargePayloadWarnBytes;
@@ -751,6 +1162,15 @@ void ScreenCaptureSource::OnEncoderOutputBuffer(
                                 summary_snapshot.non_monotonic_pts_count = diag.non_monotonic_pts_count;
                                 summary_snapshot.callback_gap_count = diag.callback_gap_count;
                                 summary_snapshot.timeline_skew_count = diag.timeline_skew_count;
+                                summary_snapshot.stream_changed_count = diag.stream_changed_count;
+                                summary_snapshot.stream_changed_config_count = diag.stream_changed_config_count;
+                                summary_snapshot.codec_config_parse_failures = diag.codec_config_parse_failures;
+                                summary_snapshot.access_units_with_config = diag.access_units_with_config;
+                                summary_snapshot.idr_with_config_count = diag.idr_with_config_count;
+                                summary_snapshot.idr_with_prepended_config_count = diag.idr_with_prepended_config_count;
+                                summary_snapshot.first_keyframe_index = diag.first_keyframe_index;
+                                summary_snapshot.first_access_unit_after_start_us = diag.first_access_unit_after_start_us;
+                                summary_snapshot.first_keyframe_after_start_us = diag.first_keyframe_after_start_us;
                                 summary_snapshot.pts_step_samples = diag.pts_step_samples;
                                 summary_snapshot.callback_step_samples = diag.callback_step_samples;
                                 summary_snapshot.avg_pts_step_us =
@@ -796,6 +1216,9 @@ void ScreenCaptureSource::OnEncoderOutputBuffer(
     }
     if (should_log_anomaly) {
         LogCallbackAnomaly(session_id, anomaly_snapshot);
+    }
+    if (should_log_access_unit_trace) {
+        LogAccessUnitTrace(session_id, access_unit_trace);
     }
 }
 

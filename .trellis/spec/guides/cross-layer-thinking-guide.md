@@ -38,6 +38,7 @@ For each arrow, ask:
 | Service ↔ Database | Format conversions, null handling |
 | Backend ↔ Frontend | Serialization, date formats |
 | Component ↔ Component | Props shape changes |
+| Manifest/config ↔ Runtime APIs | Duplicate keys, dropped permissions, build-time config that changes OS capability at runtime |
 
 ### Step 3: Define Contracts
 
@@ -68,6 +69,12 @@ For each boundary:
 
 **Good**: Each layer only knows its neighbors
 
+### Mistake 4: Duplicate Config Keys Hide Runtime Permission Changes
+
+**Bad**: Adding a second `requestPermissions` key to HarmonyOS `module.json5` when a new permission is needed.
+
+**Good**: Merge new permissions into the existing array and add a static guard for required runtime permissions. Duplicate JSON/JSON5 object keys can make the later key override the earlier one, so a native socket failure can be caused by a manifest edit rather than transport code.
+
 ---
 
 ## Checklist for Cross-Layer Features
@@ -77,6 +84,7 @@ Before implementation:
 - [ ] Identified all layer boundaries
 - [ ] Defined format at each boundary
 - [ ] Decided where validation happens
+- [ ] Checked manifest/config changes for duplicate keys and preserved existing runtime permissions
 
 After implementation:
 - [ ] Tested with edge cases (null, empty, invalid)

@@ -9,6 +9,28 @@ pub struct H264AccessUnit {
     pub encoded_bytes: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct H264AccessUnitProfile {
+    pub nal_count: usize,
+    pub has_sps: bool,
+    pub has_pps: bool,
+    pub has_idr: bool,
+    pub nal_types: Vec<u8>,
+}
+
+impl H264AccessUnitProfile {
+    pub fn nal_types_csv(&self) -> String {
+        if self.nal_types.is_empty() {
+            return "none".to_string();
+        }
+        self.nal_types
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct H264VideoPath;
 
@@ -48,6 +70,16 @@ impl H264VideoPath {
 
 pub fn access_unit_has_idr(payload: &[u8]) -> HostResult<bool> {
     inspect_annex_b_access_unit(payload).map(|inspection| inspection.has_idr_nal)
+}
+
+pub fn access_unit_profile(payload: &[u8]) -> HostResult<H264AccessUnitProfile> {
+    inspect_annex_b_access_unit(payload).map(|inspection| H264AccessUnitProfile {
+        nal_count: inspection.nal_count,
+        has_sps: inspection.has_sps_nal,
+        has_pps: inspection.has_pps_nal,
+        has_idr: inspection.has_idr_nal,
+        nal_types: inspection.nal_types,
+    })
 }
 
 pub fn decoder_config_bytes(payload: &[u8]) -> HostResult<Vec<u8>> {
@@ -111,9 +143,13 @@ pub fn decoder_config_bytes(payload: &[u8]) -> HostResult<Vec<u8>> {
     Ok(config)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct H264Inspection {
     has_idr_nal: bool,
+    has_sps_nal: bool,
+    has_pps_nal: bool,
+    nal_count: usize,
+    nal_types: Vec<u8>,
 }
 
 fn inspect_annex_b_access_unit(payload: &[u8]) -> HostResult<H264Inspection> {
@@ -130,7 +166,10 @@ fn inspect_annex_b_access_unit(payload: &[u8]) -> HostResult<H264Inspection> {
 
     let mut cursor = first_start_code;
     let mut has_idr_nal = false;
+    let mut has_sps_nal = false;
+    let mut has_pps_nal = false;
     let mut nal_count = 0;
+    let mut nal_types = Vec::new();
 
     while let Some((start_code_offset, start_code_len)) = find_annex_b_start_code(payload, cursor) {
         let nal_header_offset = start_code_offset + start_code_len;
@@ -162,10 +201,14 @@ fn inspect_annex_b_access_unit(payload: &[u8]) -> HostResult<H264Inspection> {
                 "h264 NAL header at offset {nal_header_offset} has invalid type 0"
             )));
         }
-        if nal_type == 5 {
-            has_idr_nal = true;
+        match nal_type {
+            5 => has_idr_nal = true,
+            7 => has_sps_nal = true,
+            8 => has_pps_nal = true,
+            _ => {}
         }
         nal_count += 1;
+        nal_types.push(nal_type);
         cursor = next_start_code_offset;
     }
 
@@ -175,7 +218,13 @@ fn inspect_annex_b_access_unit(payload: &[u8]) -> HostResult<H264Inspection> {
         ));
     }
 
-    Ok(H264Inspection { has_idr_nal })
+    Ok(H264Inspection {
+        has_idr_nal,
+        has_sps_nal,
+        has_pps_nal,
+        nal_count,
+        nal_types,
+    })
 }
 
 fn find_annex_b_start_code(payload: &[u8], from_offset: usize) -> Option<(usize, usize)> {
@@ -340,5 +389,21 @@ mod tests {
             super::decoder_config_bytes(&payload).expect("config extraction should pass"),
             vec![0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1f, 0, 0, 1, 0x68, 0xce, 0x06, 0xe2]
         );
+    }
+
+    #[test]
+    fn profiles_access_unit_decoder_config_and_idr_nals() {
+        let payload = [
+            0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1f, 0, 0, 1, 0x68, 0xce, 0x06, 0xe2, 0, 0, 1, 0x65,
+            0x88, 0x84,
+        ];
+
+        let profile = super::access_unit_profile(&payload).expect("profile inspection should pass");
+
+        assert_eq!(profile.nal_count, 3);
+        assert!(profile.has_sps);
+        assert!(profile.has_pps);
+        assert!(profile.has_idr);
+        assert_eq!(profile.nal_types_csv(), "7,8,5");
     }
 }
